@@ -1,0 +1,71 @@
+package exercise
+
+import (
+	"math"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestCPUQuota(t *testing.T) {
+	cpu, err := ParseCPU(" 50000 100000\n")
+	if err != nil || cpu.Unlimited || cpu.QuotaMicros != 50000 || cpu.PeriodMicros != 100000 {
+		t.Fatalf("unexpected CPU: %#v, %v", cpu, err)
+	}
+	count, limited := cpu.CPUCount()
+	if !limited || math.Abs(count-0.5) > 1e-9 {
+		t.Fatalf("CPUCount = %v, %v; want 0.5, true", count, limited)
+	}
+	unlimited, err := ParseCPU("max 100000")
+	if err != nil || !unlimited.Unlimited || unlimited.PeriodMicros != 100000 {
+		t.Fatalf("unexpected unlimited CPU: %#v, %v", unlimited, err)
+	}
+	if _, limited := unlimited.CPUCount(); limited {
+		t.Fatal("max must not become a zero-CPU limit")
+	}
+}
+
+func TestMemoryLimit(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  Memory
+	}{
+		{"67108864\n", Memory{Bytes: 67108864}},
+		{"0", Memory{}},
+		{" max\n", Memory{Unlimited: true}},
+	} {
+		got, err := ParseMemory(tc.input)
+		if err != nil || got != tc.want {
+			t.Fatalf("ParseMemory(%q) = %#v, %v; want %#v", tc.input, got, err, tc.want)
+		}
+	}
+}
+
+func TestRejectMalformedLimits(t *testing.T) {
+	for _, raw := range []string{"", "50000", "max", "1 0", "0 100000", "-1 100000", "1 max", "1 100000 extra", "1.5 100000", "18446744073709551616 100000"} {
+		if _, err := ParseCPU(raw); err == nil {
+			t.Errorf("accepted malformed cpu.max %q", raw)
+		}
+	}
+	for _, raw := range []string{"", "-1", "1 2", "max extra", "1.5", "18446744073709551616"} {
+		if _, err := ParseMemory(raw); err == nil {
+			t.Errorf("accepted malformed memory.max %q", raw)
+		}
+	}
+}
+
+func TestReadLimits(t *testing.T) {
+	dir := t.TempDir()
+	for name, value := range map[string]string{"cpu.max": "25000 100000\n", "memory.max": "1048576\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cpu, memory, err := ReadLimits(dir)
+	if err != nil || cpu.QuotaMicros != 25000 || memory.Bytes != 1048576 {
+		t.Fatalf("ReadLimits = %#v, %#v, %v", cpu, memory, err)
+	}
+	if _, _, err := ReadLimits(t.TempDir()); err == nil {
+		t.Fatal("missing cgroup files must return an error")
+	}
+}

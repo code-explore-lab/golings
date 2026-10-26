@@ -1,0 +1,71 @@
+//go:build integration
+
+package exercise
+
+import (
+	"encoding/json"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestIntegrationPrometheusScrapesGoService(t *testing.T) {
+	metricsURL, prometheusURL := os.Getenv("GOPATH_METRICS_URL"), os.Getenv("GOPATH_PROMETHEUS_URL")
+	if metricsURL == "" {
+		metricsURL = "http://127.0.0.1:2112"
+	}
+	if prometheusURL == "" {
+		prometheusURL = "http://127.0.0.1:9090"
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	get := func(target string) []byte {
+		t.Helper()
+		response, err := client.Get(target)
+		if err != nil {
+			t.Fatalf("GET %s: %v; start the real metrics and Prometheus containers from README.md", target, err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: status=%d error=%v body=%s", target, response.StatusCode, err, body)
+		}
+		return body
+	}
+	get(strings.TrimRight(metricsURL, "/") + "/work")
+	text := string(get(strings.TrimRight(metricsURL, "/") + "/metrics"))
+	if !strings.Contains(text, `gopath_http_requests_total{method="GET",route="/work",status="200"}`) {
+		t.Fatal("live Go service did not expose the business request counter")
+	}
+	for _, query := range []string{`up{job="gopath-service"}`, `sum(gopath_http_requests_total{job="gopath-service",route="/work",status="200"})`} {
+		var result struct {
+			Status string
+			Data   struct {
+				ResultType string
+				Result     []struct{ Value []json.RawMessage }
+			}
+		}
+		body := get(strings.TrimRight(prometheusURL, "/") + "/api/v1/query?" + url.Values{"query": {query}}.Encode())
+		if err := json.Unmarshal(body, &result); err != nil || result.Status != "success" || result.Data.ResultType != "vector" || len(result.Data.Result) == 0 {
+			t.Fatalf("Prometheus query %s has no samples; wait for a successful scrape, then rerun: %s", query, body)
+		}
+		for _, sample := range result.Data.Result {
+			if len(sample.Value) != 2 {
+				t.Fatalf("invalid sample: %s", body)
+			}
+			var raw string
+			if err := json.Unmarshal(sample.Value[1], &raw); err != nil {
+				t.Fatal(err)
+			}
+			value, err := strconv.ParseFloat(raw, 64)
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 1 {
+				t.Fatalf("query %s returned %q; require a healthy scrape and nonzero business traffic", query, raw)
+			}
+		}
+	}
+}

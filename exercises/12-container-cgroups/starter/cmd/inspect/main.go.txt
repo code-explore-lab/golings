@@ -1,0 +1,30 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	exercise "gopath/exercise/12-container-cgroups"
+)
+
+func main() {
+	dir := "/sys/fs/cgroup"
+	if len(os.Args) > 1 {
+		dir = os.Args[1]
+	}
+	cpu, memory, err := exercise.ReadLimits(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if count, limited := cpu.CPUCount(); limited {
+		fmt.Printf("cpu: quota=%d period=%d capacity=%.3f\n", cpu.QuotaMicros, cpu.PeriodMicros, count)
+	} else {
+		fmt.Println("cpu: max (check ancestor limits separately)")
+	}
+	if memory.Unlimited {
+		fmt.Println("memory: max (check ancestor limits separately)")
+	} else {
+		fmt.Printf("memory: %d bytes\n", memory.Bytes)
+	}
+}

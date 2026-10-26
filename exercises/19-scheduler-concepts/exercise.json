@@ -1,0 +1,28 @@
+{
+  "id": "19-scheduler-concepts",
+  "title": "调度器基础概念模型",
+  "category": "算力调度基础认知",
+  "difficulty": "入门",
+  "description": "用小型 Go 模型理解资源请求、节点选择器、过滤与评分；不实现生产调度算法。",
+  "objectives": [
+    "理解 Pod 请求与节点可用资源",
+    "区分过滤与评分",
+    "解释 Pending 的基础原因"
+  ],
+  "hints": [
+    "先过滤资源不足或标签不匹配的节点。",
+    "在可行节点中按剩余 CPU 选择，平分时按节点名稳定排序。",
+    "这是教学模型，实际 kube-scheduler 的资源记账、插件和绑定更复杂。"
+  ],
+  "acceptance": [
+    "过滤 CPU、内存不足和标签不匹配节点",
+    "无可行节点返回 false",
+    "按题设简单策略选择并稳定处理并列",
+    "不修改输入节点列表"
+  ],
+  "concept": "Scheduler 为尚未绑定节点的 Pod 寻找合适节点。本题仅建模基本 Filter/Score，不涉及 GPU、复杂算法或 Kubernetes 调度源码。",
+  "check": "go-test",
+  "prerequisites": [
+    "07-k8s-client-go"
+  ]
+}

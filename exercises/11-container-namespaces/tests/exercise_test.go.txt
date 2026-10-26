@@ -1,0 +1,46 @@
+package exercise
+
+import "testing"
+
+func TestParseNamespaceLink(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  Namespace
+	}{
+		{"pid:[4026531836]", Namespace{"pid", 4026531836}},
+		{"  net:[4026531992]\n", Namespace{"net", 4026531992}},
+		{"time_for_children:[42]", Namespace{"time_for_children", 42}},
+		{"uts:[18446744073709551615]", Namespace{"uts", ^uint64(0)}},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			got, err := ParseNamespaceLink(tc.input)
+			if err != nil || got != tc.want {
+				t.Fatalf("ParseNamespaceLink(%q) = %#v, %v; want %#v", tc.input, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRejectMalformedNamespaceLinks(t *testing.T) {
+	for _, input := range []string{"", "pid:402", "pid:[]", "pid:[0]", "pid:[-1]", "pid:[1]junk", "pid:[1][2]", "pid:[18446744073709551616]", ":[1]", "pid:[1.0]", "p id:[1]"} {
+		if _, err := ParseNamespaceLink(input); err == nil {
+			t.Errorf("accepted malformed namespace link %q", input)
+		}
+	}
+}
+
+func TestNamespaceIdentity(t *testing.T) {
+	pid := Namespace{"pid", 42}
+	if !SameNamespace(pid, pid) {
+		t.Error("identical namespace references must compare equal")
+	}
+	if SameNamespace(pid, Namespace{"net", 42}) || SameNamespace(pid, Namespace{"pid", 43}) {
+		t.Error("type and inode must both match")
+	}
+}
+
+func TestReadNamespacesReportsMissingProcfs(t *testing.T) {
+	if _, err := ReadNamespaces(t.TempDir() + "/missing"); err == nil {
+		t.Fatal("missing procfs must be reported")
+	}
+}

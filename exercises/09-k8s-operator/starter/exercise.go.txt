@@ -1,0 +1,163 @@
+package lesson
+
+import (
+	"context"
+	"fmt"
+	"math"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+	appinformers "k8s.io/client-go/informers/apps/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
+)
+
+var appPlanGVR = schema.GroupVersionResource{
+	Group: "learning.example.io", Version: "v1alpha1", Resource: "appplans",
+}
+var appPlanGVK = schema.GroupVersionKind{
+	Group: "learning.example.io", Version: "v1alpha1", Kind: "AppPlan",
+}
+
+// Reconcile turns domain knowledge (AppPlan) into ordinary Kubernetes objects.
+// The queue calls it again after transient API errors and on observed changes.
+func Reconcile(ctx context.Context, dc dynamic.Interface, client kubernetes.Interface, key types.NamespacedName) error {
+	plan, err := dc.Resource(appPlanGVR).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil // garbage collection, not an imperative "delete" event, owns cleanup
+	}
+	if err != nil {
+		return fmt.Errorf("get AppPlan: %w", err)
+	}
+	if plan.GetDeletionTimestamp() != nil {
+		return nil
+	}
+	replicas, found, err := unstructured.NestedInt64(plan.Object, "spec", "replicas")
+	if err != nil || !found || replicas < 0 || replicas > math.MaxInt32 {
+		return fmt.Errorf("AppPlan %s requires spec.replicas in [0, %d]", key, math.MaxInt32)
+	}
+	image, found, err := unstructured.NestedString(plan.Object, "spec", "image")
+	if err != nil || !found || image == "" {
+		return fmt.Errorf("AppPlan %s requires a nonempty string spec.image", key)
+	}
+	if plan.GetUID() == "" {
+		return fmt.Errorf("AppPlan %s has no server-assigned UID", key)
+	}
+	return EnsureDeployment(ctx, client, plan, int32(replicas), image)
+}
+
+// EnsureDeployment manages replicas, its app label and the app container image.
+// It preserves unrelated fields and refuses to take over someone else's object.
+func EnsureDeployment(ctx context.Context, client kubernetes.Interface, plan *unstructured.Unstructured, replicas int32, image string) error {
+	// TODO: create a Deployment with a controller owner reference to plan.
+	// On an existing owned Deployment, repair replicas/image while preserving
+	// other fields. Return without Update when already converged.
+	// Refuse adoption when a Deployment has no matching controller owner.
+	_ = appsv1.Deployment{}
+	_ = corev1.PodTemplateSpec{}
+	return fmt.Errorf("TODO: reconcile Deployment for %s/%s", plan.GetNamespace(), plan.GetName())
+}
+
+// processNext has one Get / Done pair. Failures are retried with backoff;
+// success clears retry history. Returning false tells the worker to stop.
+func processNext(ctx context.Context, queue workqueue.TypedRateLimitingInterface[types.NamespacedName],
+	reconcile func(context.Context, types.NamespacedName) error, onError func(error)) bool {
+	key, shutdown := queue.Get()
+	if shutdown {
+		return false
+	}
+	defer queue.Done(key)
+	if err := reconcile(ctx, key); err != nil {
+		if onError != nil {
+			onError(err)
+		}
+		if ctx.Err() == nil {
+			queue.AddRateLimited(key)
+		} else {
+			queue.Forget(key)
+		}
+	} else {
+		queue.Forget(key)
+	}
+	return true
+}
+
+// RunOperator also watches owned Deployments, so manual drift and deletion of a
+// child resource enqueue the parent AppPlan even when its spec did not change.
+func RunOperator(ctx context.Context, dc dynamic.Interface, client kubernetes.Interface, namespace string, onError func(error)) error {
+	if namespace == "" {
+		return fmt.Errorf("an explicit namespace is required")
+	}
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[types.NamespacedName]())
+	defer queue.ShutDown()
+	plans := dynamicinformer.NewFilteredDynamicInformer(dc, appPlanGVR, namespace, 0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, nil).Informer()
+	deployments := appinformers.NewFilteredDeploymentInformer(client, namespace, 0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, nil)
+	enqueuePlan := func(obj interface{}) {
+		key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+		if err != nil {
+			return
+		}
+		ns, name, err := cache.SplitMetaNamespaceKey(key)
+		if err == nil && ns == namespace {
+			queue.Add(types.NamespacedName{Namespace: ns, Name: name})
+		}
+	}
+	enqueueOwner := func(obj interface{}) {
+		if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+			obj = tombstone.Obj
+		}
+		if tombstone, ok := obj.(*cache.DeletedFinalStateUnknown); ok && tombstone != nil {
+			obj = tombstone.Obj
+		}
+		deployment, ok := obj.(*appsv1.Deployment)
+		if !ok || deployment.Namespace != namespace {
+			return
+		}
+		owner := metav1.GetControllerOf(deployment)
+		if owner != nil && owner.Kind == "AppPlan" && owner.APIVersion == appPlanGVK.GroupVersion().String() {
+			queue.Add(types.NamespacedName{Namespace: namespace, Name: owner.Name})
+		}
+	}
+	if _, err := plans.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: enqueuePlan, UpdateFunc: func(_, obj interface{}) { enqueuePlan(obj) }, DeleteFunc: enqueuePlan,
+	}); err != nil {
+		return err
+	}
+	if _, err := deployments.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: enqueueOwner, UpdateFunc: func(_, obj interface{}) { enqueueOwner(obj) }, DeleteFunc: enqueueOwner,
+	}); err != nil {
+		return err
+	}
+	plansDone, deploymentsDone := make(chan struct{}), make(chan struct{})
+	go func() { defer close(plansDone); plans.Run(ctx.Done()) }()
+	go func() { defer close(deploymentsDone); deployments.Run(ctx.Done()) }()
+	if !cache.WaitForCacheSync(ctx.Done(), plans.HasSynced, deployments.HasSynced) {
+		<-plansDone
+		<-deploymentsDone
+		return fmt.Errorf("sync operator caches: %w", ctx.Err())
+	}
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for processNext(ctx, queue, func(ctx context.Context, key types.NamespacedName) error {
+			return Reconcile(ctx, dc, client, key)
+		}, onError) {
+		}
+	}()
+	<-ctx.Done()
+	queue.ShutDown()
+	<-workerDone
+	<-plansDone
+	<-deploymentsDone
+	return nil
+}

@@ -1,0 +1,46 @@
+package exercise
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+type Namespace struct {
+	Kind  string
+	Inode uint64
+}
+
+// ParseNamespaceLink accepts a readlink target such as "pid:[4026531836]".
+func ParseNamespaceLink(link string) (Namespace, error) {
+	// TODO: validate the whole input and parse a nonzero uint64 inode.
+	return Namespace{}, errors.New("TODO: parse namespace link")
+}
+
+func SameNamespace(a, b Namespace) bool {
+	// TODO: namespace identity includes both the namespace kind and inode.
+	return false
+}
+
+// ReadNamespaces reads symlink targets, not the files behind those links.
+// On Linux use /proc/self/ns; on other platforms this should report an error.
+func ReadNamespaces(dir string) (map[string]Namespace, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read namespace directory: %w", err)
+	}
+	out := make(map[string]Namespace, len(entries))
+	for _, entry := range entries {
+		link, err := os.Readlink(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read namespace %s: %w", entry.Name(), err)
+		}
+		ns, err := ParseNamespaceLink(link)
+		if err != nil {
+			return nil, fmt.Errorf("parse namespace %s: %w", entry.Name(), err)
+		}
+		out[entry.Name()] = ns
+	}
+	return out, nil
+}

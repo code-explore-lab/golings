@@ -1,0 +1,19 @@
+package exercise
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+type createUserRequest struct{ Name string }
+type createUserResponse struct{ Name string }
+
+func CreateUserHandler(w http.ResponseWriter, r *http.Request) {
+	var request createUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	} // TODO: trim and validate Name; set application/json and respond with JSON and status 201.
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(createUserResponse{Name: request.Name})
+}

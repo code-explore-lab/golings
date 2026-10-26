@@ -1,0 +1,5 @@
+/build/
+/gopath-workspace/
+*.test
+*.test.exe
+coverage.out

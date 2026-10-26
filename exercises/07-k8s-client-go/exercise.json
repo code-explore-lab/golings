@@ -1,0 +1,27 @@
+{
+  "id": "07-k8s-client-go",
+  "title": "client-go 连接 Minikube：Pod List / Watch / Informer",
+  "category": "Kubernetes 扩展",
+  "difficulty": "进阶",
+  "description": "实现真实 client-go Pod API 调用与 Informer 回调；先用 fake 客户端验证，再在 Minikube 上验收。",
+  "objectives": [
+    "读取 kubeconfig 并连接 Kubernetes API",
+    "按命名空间 List Pod，保留 API 错误",
+    "通过 Informer 观察 Add / Update / Delete，处理删除墓碑与取消"
+  ],
+  "hints": [
+    "ListPods 使用 client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})。",
+    "Informer 首次 List 建立缓存，再用 Watch 接收变化；回调不应修改缓存对象。",
+    "Delete 回调可能收到 cache.DeletedFinalStateUnknown；解包其 Obj 后再做类型判断。"
+  ],
+  "acceptance": [
+    "本地 API 错误、命名空间隔离与真实 informer List-Watch 单测通过",
+    "TestIntegrationPodListWatchOnMinikube 在新建测试命名空间验证真实 Pod List / Add / Delete"
+  ],
+  "concept": "Informer = 初次 List + 持续 Watch + 本地缓存；删除墓碑保存可能漏掉的对象最终信息。",
+  "prerequisites": [
+    "03-context-cancel"
+  ],
+  "check": "go-test",
+  "integration": true
+}

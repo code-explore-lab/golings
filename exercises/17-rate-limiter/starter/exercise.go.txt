@@ -1,0 +1,16 @@
+package exercise
+
+import "time"
+
+type TokenBucket struct {
+	// TODO: track capacity, tokens, refill clock, and a lock.
+}
+
+func NewTokenBucket(capacity int, refillEvery time.Duration, now time.Time) (*TokenBucket, error) {
+	return &TokenBucket{}, nil
+}
+
+func (b *TokenBucket) Allow(now time.Time) bool {
+	// TODO: refill complete periods and atomically consume one token.
+	return true
+}

@@ -1,0 +1,49 @@
+//go:build integration
+
+package exercise
+
+import (
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"testing"
+)
+
+func TestIntegrationLiveCgroupV2Limits(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Fatal("cgroup integration requires Linux with cgroup v2; run inside the limited Docker container described in README.md")
+	}
+	dir := os.Getenv("GOPATH_CGROUP_DIR")
+	if dir == "" {
+		dir = "/sys/fs/cgroup"
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cgroup.controllers")); err != nil {
+		t.Fatalf("%s is not an accessible cgroup v2 directory: %v", dir, err)
+	}
+	cpu, memory, err := ReadLimits(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCPUText, wantMemoryText := os.Getenv("GOPATH_EXPECT_CPU"), os.Getenv("GOPATH_EXPECT_MEMORY")
+	if wantCPUText == "" || wantMemoryText == "" {
+		t.Fatal("set GOPATH_EXPECT_CPU=0.5 and GOPATH_EXPECT_MEMORY=67108864 inside a --cpus=0.5 --memory=64m container; expected limits must be explicit")
+	}
+	wantCPU, err := strconv.ParseFloat(wantCPUText, 64)
+	if err != nil || wantCPU <= 0 || math.IsNaN(wantCPU) || math.IsInf(wantCPU, 0) {
+		t.Fatalf("invalid GOPATH_EXPECT_CPU %q", wantCPUText)
+	}
+	wantMemory, err := strconv.ParseUint(wantMemoryText, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid GOPATH_EXPECT_MEMORY %q", wantMemoryText)
+	}
+	gotCPU, limited := cpu.CPUCount()
+	if !limited || math.Abs(gotCPU-wantCPU) > 1e-6 {
+		t.Fatalf("live CPU capacity=%v limited=%v; want %v", gotCPU, limited, wantCPU)
+	}
+	if memory.Unlimited || memory.Bytes != wantMemory {
+		t.Fatalf("live memory=%#v; want %d bytes", memory, wantMemory)
+	}
+	t.Logf("verified live cgroup v2: CPU=%v memory=%d bytes", gotCPU, memory.Bytes)
+}

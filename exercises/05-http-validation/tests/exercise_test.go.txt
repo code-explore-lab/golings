@@ -1,0 +1,49 @@
+package exercise
+
+import (
+	"encoding/json"
+	"mime"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestCreateUserHandler(t *testing.T) {
+	cases := []struct {
+		name, body string
+		wantStatus int
+		wantName   string
+	}{
+		{"valid", `{"name":"Ada"}`, http.StatusCreated, "Ada"},
+		{"trimmed", `{"name":"  Lin  "}`, http.StatusCreated, "Lin"},
+		{"blank", `{"name":"  "}`, http.StatusBadRequest, ""},
+		{"missing", `{}`, http.StatusBadRequest, ""},
+		{"wrong type", `{"name":123}`, http.StatusBadRequest, ""},
+		{"invalid JSON", `{`, http.StatusBadRequest, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(tc.body))
+			CreateUserHandler(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status=%d want %d; body=%q", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if tc.wantStatus != http.StatusCreated {
+				return
+			}
+			mediaType, _, err := mime.ParseMediaType(rr.Header().Get("Content-Type"))
+			if err != nil || mediaType != "application/json" {
+				t.Fatalf("Content-Type=%q", rr.Header().Get("Content-Type"))
+			}
+			var body struct{ Name string }
+			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+				t.Fatalf("response is not JSON: %v", err)
+			}
+			if body.Name != tc.wantName {
+				t.Fatalf("name=%q want %q", body.Name, tc.wantName)
+			}
+		})
+	}
+}

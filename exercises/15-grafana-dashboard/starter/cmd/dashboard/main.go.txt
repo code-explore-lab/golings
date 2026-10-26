@@ -1,0 +1,30 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	exercise "gopath/exercise/15-grafana-dashboard"
+)
+
+func main() {
+	output := flag.String("output", "dashboards/gopath-http.json", "output dashboard JSON path")
+	datasource := flag.String("datasource", "gopath-prometheus", "provisioned Prometheus datasource UID")
+	flag.Parse()
+	data, err := exercise.BuildDashboard(*datasource)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "generate dashboard:", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Dir(*output), 0755); err != nil {
+		fmt.Fprintln(os.Stderr, "create output directory:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(*output, append(data, '\n'), 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "write dashboard:", err)
+		os.Exit(1)
+	}
+	fmt.Println("dashboard written to", *output)
+}

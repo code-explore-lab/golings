@@ -1,0 +1,69 @@
+package exercise
+
+import (
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+type Metrics struct {
+	registry *prometheus.Registry
+	requests *prometheus.CounterVec
+	duration *prometheus.HistogramVec
+}
+
+func NewMetrics() *Metrics {
+	m := &Metrics{
+		registry: prometheus.NewRegistry(),
+		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gopath_http_requests_total", Help: "Number of completed HTTP requests.",
+		}, []string{"method", "route", "status"}),
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "gopath_http_request_duration_seconds", Help: "HTTP request duration in seconds.",
+			Buckets: []float64{0.005, 0.01, 0.05, 0.1, 0.5, 1},
+		}, []string{"method", "route"}),
+	}
+	m.registry.MustRegister(m.requests, m.duration)
+	return m
+}
+
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (m *Metrics) Instrument(route string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		writer := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(writer, r)
+		status := writer.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		m.requests.WithLabelValues(r.Method, route, strconv.Itoa(status)).Inc()
+		m.duration.WithLabelValues(r.Method, route).Observe(time.Since(start).Seconds())
+	})
+}

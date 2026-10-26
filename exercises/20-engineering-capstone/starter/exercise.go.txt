@@ -1,0 +1,30 @@
+package exercise
+
+import (
+	"context"
+	"net/http"
+)
+
+type Gate struct {
+	// TODO: synchronize drain state and in-flight request count.
+}
+
+func NewGate() *Gate { return &Gate{} }
+
+func (g *Gate) Ready(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+func (g *Gate) Wrap(next http.Handler) http.Handler {
+	// TODO: reject new requests after drain begins, and track existing requests.
+	return next
+}
+
+func (g *Gate) BeginDrain() {
+	// TODO: stop new admission and signal when in-flight count reaches zero.
+}
+
+func (g *Gate) Wait(ctx context.Context) error {
+	// TODO: wait for drain completion or cancellation.
+	return nil
+}

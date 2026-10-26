@@ -1,0 +1,38 @@
+package exercise
+
+import (
+	"encoding/json"
+	"io"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestLogRequestFields(t *testing.T) {
+	var out strings.Builder
+	logger := NewRequestLogger(&out)
+	cases := []struct {
+		method, target, path string
+		status               int
+	}{
+		{"GET", "/healthz", "/healthz", 204},
+		{"POST", "/users?source=signup", "/users", 201},
+	}
+	for _, tc := range cases {
+		LogRequest(logger, httptest.NewRequest(tc.method, tc.target, nil), tc.status)
+	}
+	decoder := json.NewDecoder(strings.NewReader(out.String()))
+	for _, tc := range cases {
+		var entry map[string]any
+		if err := decoder.Decode(&entry); err != nil {
+			t.Fatalf("invalid JSON logs %q: %v", out.String(), err)
+		}
+		if entry["method"] != tc.method || entry["path"] != tc.path || entry["status"] != float64(tc.status) {
+			t.Fatalf("fields=%#v want method=%s path=%s status=%d", entry, tc.method, tc.path, tc.status)
+		}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("expected exactly one JSON entry per request, got %v, %v", extra, err)
+	}
+}

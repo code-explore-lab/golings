@@ -1,0 +1,45 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"lesson"
+)
+
+func main() {
+	operation := flag.String("operation", "package", "package, install, upgrade, rollback")
+	chart := flag.String("chart", "chart", "Chart directory or packaged tgz")
+	destination := flag.String("destination", "dist", "package output directory")
+	release := flag.String("release", "demo", "Helm release name")
+	namespace := flag.String("namespace", "", "existing learning namespace")
+	replicas := flag.Int("replicas", 2, "desired replica count for upgrade")
+	revision := flag.Int("revision", 1, "explicit revision for rollback")
+	flag.Parse()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	h := lesson.Helm{Run: lesson.ExecRunner, Namespace: *namespace, KubeContext: "minikube"}
+	var err error
+	switch *operation {
+	case "package":
+		if err = os.MkdirAll(*destination, 0755); err == nil {
+			err = h.Package(ctx, *chart, *destination)
+		}
+	case "install":
+		err = h.Install(ctx, *release, *chart)
+	case "upgrade":
+		err = h.Upgrade(ctx, *release, *chart, *replicas)
+	case "rollback":
+		err = h.Rollback(ctx, *release, *revision)
+	default:
+		err = fmt.Errorf("unknown operation %q", *operation)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%s completed", *operation)
+}

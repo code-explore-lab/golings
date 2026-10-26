@@ -1,0 +1,25 @@
+package exercise
+
+type Resources struct{ MilliCPU, MemoryMiB int }
+type Node struct {
+	Name      string
+	Labels    map[string]string
+	Available Resources
+}
+type Pod struct {
+	Request  Resources
+	Selector map[string]string
+}
+
+func EligibleNodes(pod Pod, nodes []Node) []Node {
+	// TODO: filter by both resources and every selector label.
+	return append([]Node(nil), nodes...)
+}
+
+func ChooseNode(pod Pod, nodes []Node) (string, bool) {
+	// TODO: choose most remaining CPU, with stable name tie-break.
+	if len(nodes) == 0 {
+		return "", false
+	}
+	return nodes[0].Name, true
+}

@@ -1,0 +1,91 @@
+package exercise
+
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func makeBucket(t *testing.T, capacity int, start time.Time) *TokenBucket {
+	t.Helper()
+	b, err := NewTokenBucket(capacity, time.Second, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestBurstAndRefill(t *testing.T) {
+	start := time.Unix(0, 0)
+	b := makeBucket(t, 2, start)
+	if !b.Allow(start) || !b.Allow(start) || b.Allow(start) {
+		t.Fatal("initial burst must equal capacity")
+	}
+	if b.Allow(start.Add(500 * time.Millisecond)) {
+		t.Fatal("partial interval added a token")
+	}
+	if !b.Allow(start.Add(time.Second)) {
+		t.Fatal("one interval must refill one token")
+	}
+	if b.Allow(start.Add(1500 * time.Millisecond)) {
+		t.Fatal("partial interval added a token")
+	}
+	if !b.Allow(start.Add(2 * time.Second)) {
+		t.Fatal("partial interval was lost")
+	}
+}
+
+func TestIdleCapAndBackwardClock(t *testing.T) {
+	start := time.Unix(0, 0)
+	b := makeBucket(t, 2, start)
+	b.Allow(start)
+	b.Allow(start)
+	later := start.Add(10 * time.Second)
+	if !b.Allow(later) || !b.Allow(later) || b.Allow(later) {
+		t.Fatal("idle refill must cap at capacity")
+	}
+	if b.Allow(start) {
+		t.Fatal("backward clock refilled")
+	}
+	if b.Allow(later.Add(500 * time.Millisecond)) {
+		t.Fatal("clock reset when it moved backwards")
+	}
+	if !b.Allow(later.Add(time.Second)) {
+		t.Fatal("refill did not resume")
+	}
+}
+
+func TestConcurrentAdmissionDoesNotExceedCapacity(t *testing.T) {
+	start := time.Unix(0, 0)
+	b := makeBucket(t, 5, start)
+	var accepted atomic.Int64
+	var wg sync.WaitGroup
+	gate := make(chan struct{})
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-gate
+			if b.Allow(start) {
+				accepted.Add(1)
+			}
+		}()
+	}
+	close(gate)
+	wg.Wait()
+	if accepted.Load() != 5 {
+		t.Fatalf("accepted=%d, want 5", accepted.Load())
+	}
+}
+
+func TestInvalidBucketConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		capacity int
+		every    time.Duration
+	}{{0, time.Second}, {-1, time.Second}, {1, 0}, {1, -time.Second}} {
+		if _, err := NewTokenBucket(tc.capacity, tc.every, time.Unix(0, 0)); err == nil {
+			t.Errorf("accepted capacity=%d interval=%v", tc.capacity, tc.every)
+		}
+	}
+}

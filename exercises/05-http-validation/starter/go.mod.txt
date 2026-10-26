@@ -1,0 +1,3 @@
+module gopath/exercise/05-http-validation
+
+go 1.27

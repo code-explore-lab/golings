@@ -1,0 +1,10 @@
+package exercise
+
+func MapBounded(inputs []int, workers int, transform func(int) int) []int {
+	// TODO: implement a bounded goroutine pool; keep result order.
+	results := make([]int, len(inputs))
+	for i, v := range inputs {
+		results[i] = transform(v)
+	}
+	return results
+}

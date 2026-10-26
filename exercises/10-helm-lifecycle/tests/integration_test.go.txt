@@ -1,0 +1,119 @@
+//go:build integration
+
+package lesson
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestIntegrationHelmLifecycleOnMinikube(t *testing.T) {
+	if os.Getenv("GOPATH_INTEGRATION") != "1" {
+		t.Fatal("run gopath check 10-helm-lifecycle --integration, or set GOPATH_INTEGRATION=1 explicitly")
+	}
+	for _, binary := range []string{"kubectl", "helm"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			t.Fatalf("%s is required for real Helm acceptance: %v", binary, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	output := func(binary string, args ...string) ([]byte, error) {
+		data, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("%s %v: %w\n%s", binary, args, err, data)
+		}
+		return data, nil
+	}
+	current, err := output("kubectl", "config", "current-context")
+	if err != nil || strings.TrimSpace(string(current)) != "minikube" {
+		t.Fatalf("integration requires current-context=minikube; run kubectl config use-context minikube: %v", err)
+	}
+	namespace := os.Getenv("GOPATH_NAMESPACE")
+	if namespace == "" {
+		namespace = fmt.Sprintf("gopath-10-%d", time.Now().UnixNano())
+	}
+	if !strings.HasPrefix(namespace, "gopath-") || validateName("namespace", namespace, 63) != nil {
+		t.Fatal("GOPATH_NAMESPACE must be a new DNS label beginning with gopath-; existing namespaces are never reused")
+	}
+	created, err := output("kubectl", "--context", "minikube", "create", "namespace", namespace, "-o", "json")
+	if err != nil {
+		t.Fatalf("create a fresh isolated namespace; existing namespaces are never reused: %v", err)
+	}
+	var owned struct {
+		Metadata struct{ UID string }
+	}
+	if err := json.Unmarshal(created, &owned); err != nil || owned.Metadata.UID == "" {
+		t.Fatalf("read test-created namespace UID: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stop()
+		// Refuse cleanup if a different namespace was created under the same name.
+		data, err := exec.CommandContext(cleanup, "kubectl", "--context", "minikube", "get", "namespace", namespace, "-o", "json").CombinedOutput()
+		var current struct{ Metadata struct{ UID string } }
+		if err != nil || json.Unmarshal(data, &current) != nil || current.Metadata.UID != owned.Metadata.UID {
+			t.Errorf("refusing cleanup because test namespace identity changed: %s error=%v", data, err)
+			return
+		}
+		data, err = exec.CommandContext(cleanup, "kubectl", "--context", "minikube", "delete", "namespace", namespace, "--wait=false").CombinedOutput()
+		if err != nil {
+			t.Errorf("cleanup only test-created namespace %s: %s error=%v", namespace, data, err)
+		}
+	})
+	if _, err := output("helm", "lint", "chart"); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := output("helm", "template", "demo", "chart", "--namespace", namespace, "--kube-context", "minikube")
+	if err != nil || !strings.Contains(string(rendered), "kind: Deployment") || !strings.Contains(string(rendered), "kind: Service") {
+		t.Fatalf("Chart must render both Deployment and Service: %s error=%v", rendered, err)
+	}
+	h := Helm{Run: ExecRunner, Namespace: namespace, KubeContext: "minikube"}
+	destination := t.TempDir()
+	if err := h.Package(ctx, "chart", destination); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(destination, "gopath-demo-0.1.0.tgz")
+	if info, err := os.Stat(archive); err != nil || info.Size() == 0 {
+		t.Fatalf("helm package did not produce %s: %v", archive, err)
+	}
+	assertDeployment := func(want int) {
+		t.Helper()
+		data, err := output("kubectl", "--context", "minikube", "-n", namespace, "get", "deployment", "demo", "-o", "json")
+		var object struct {
+			Spec   struct{ Replicas int }
+			Status struct{ ReadyReplicas int }
+		}
+		if err != nil || json.Unmarshal(data, &object) != nil || object.Spec.Replicas != want || object.Status.ReadyReplicas < want {
+			t.Fatalf("real ready Deployment must have %d replicas: %s error=%v", want, data, err)
+		}
+	}
+	if err := h.Install(ctx, "demo", archive); err != nil {
+		t.Fatalf("install failed; pre-load nginx:1.27 into minikube if image pulling is slow: %v", err)
+	}
+	assertDeployment(1)
+	if err := h.Upgrade(ctx, "demo", archive, 2); err != nil {
+		t.Fatal(err)
+	}
+	assertDeployment(2)
+	if err := h.Rollback(ctx, "demo", 1); err != nil {
+		t.Fatal(err)
+	}
+	assertDeployment(1)
+	history, err := output("helm", "history", "demo", "--namespace", namespace, "--kube-context", "minikube", "-o", "json")
+	var revisions []struct {
+		Revision int
+		Status   string
+	}
+	if err != nil || json.Unmarshal(history, &revisions) != nil || len(revisions) != 3 ||
+		revisions[2].Revision != 3 || revisions[2].Status != "deployed" {
+		t.Fatalf("rollback must create deployed revision 3 from revision 1: %s error=%v", history, err)
+	}
+}

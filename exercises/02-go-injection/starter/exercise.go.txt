@@ -1,0 +1,15 @@
+package exercise
+
+import "errors"
+
+type Notifier interface{ Send(message string) error }
+type Service struct{ notifier Notifier }
+
+func NewService(notifier Notifier) *Service { return &Service{notifier: notifier} }
+func (s *Service) SendWelcome(name string) error {
+	if s == nil || s.notifier == nil {
+		return errors.New("notifier is required")
+	}
+	// TODO: send "Welcome, <name>!" using the injected notifier.
+	return nil
+}

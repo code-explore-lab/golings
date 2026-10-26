@@ -1,0 +1,142 @@
+package lesson
+
+import (
+	"context"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
+)
+
+var gadgetGVR = schema.GroupVersionResource{
+	Group: "learning.example.io", Version: "v1alpha1", Resource: "gadgets",
+}
+
+// Reconcile always reads current state. Events are hints, not authoritative
+// snapshots; a key can be queued several times or outlive the custom resource.
+func Reconcile(ctx context.Context, dc dynamic.Interface, client kubernetes.Interface, key types.NamespacedName) error {
+	object, err := dc.Resource(gadgetGVR).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get Gadget: %w", err)
+	}
+	message, found, err := unstructured.NestedString(object.Object, "spec", "message")
+	if err != nil || !found {
+		return fmt.Errorf("Gadget %s requires a string spec.message", key)
+	}
+	return EnsureConfigMap(ctx, client, key.Namespace, key.Name, message)
+}
+
+// EnsureConfigMap owns only Data["message"]; other keys and metadata survive.
+// A successful second reconcile with unchanged desired state must make no write.
+func EnsureConfigMap(ctx context.Context, client kubernetes.Interface, namespace, name, message string) error {
+	configMaps := client.CoreV1().ConfigMaps(namespace)
+	current, err := configMaps.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = configMaps.Create(ctx, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+			Data:       map[string]string{"message": message},
+		}, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("get ConfigMap: %w", err)
+	}
+	if value, present := current.Data["message"]; present && value == message {
+		return nil
+	}
+	next := current.DeepCopy()
+	if next.Data == nil {
+		next.Data = make(map[string]string)
+	}
+	next.Data["message"] = message
+	_, err = configMaps.Update(ctx, next, metav1.UpdateOptions{})
+	return err
+}
+
+// processNext has one Get / Done pair. Failures are retried with backoff;
+// success clears retry history. Returning false tells the worker to stop.
+func processNext(ctx context.Context, queue workqueue.TypedRateLimitingInterface[types.NamespacedName],
+	reconcile func(context.Context, types.NamespacedName) error, onError func(error)) bool {
+	key, shutdown := queue.Get()
+	if shutdown {
+		return false
+	}
+	defer queue.Done(key)
+	if err := reconcile(ctx, key); err != nil {
+		if onError != nil {
+			onError(err)
+		}
+		if ctx.Err() == nil {
+			queue.AddRateLimited(key)
+		} else {
+			queue.Forget(key)
+		}
+	} else {
+		queue.Forget(key)
+	}
+	return true
+}
+
+// RunController is intentionally small: one namespace, one informer, one worker.
+// Handler callbacks enqueue keys quickly; API calls and retries run in the worker.
+func RunController(ctx context.Context, dc dynamic.Interface, client kubernetes.Interface, namespace string, onError func(error)) error {
+	if namespace == "" {
+		return fmt.Errorf("an explicit namespace is required")
+	}
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[types.NamespacedName]())
+	defer queue.ShutDown()
+	informer := dynamicinformer.NewFilteredDynamicInformer(dc, gadgetGVR, namespace, 0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, nil).Informer()
+	enqueue := func(obj interface{}) {
+		key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+		if err != nil {
+			if onError != nil {
+				onError(err)
+			}
+			return
+		}
+		ns, name, err := cache.SplitMetaNamespaceKey(key)
+		if err == nil && ns == namespace {
+			queue.Add(types.NamespacedName{Namespace: ns, Name: name})
+		}
+	}
+	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: enqueue, UpdateFunc: func(_, current interface{}) { enqueue(current) }, DeleteFunc: enqueue,
+	}); err != nil {
+		return fmt.Errorf("register Gadget handler: %w", err)
+	}
+	informerDone := make(chan struct{})
+	go func() {
+		defer close(informerDone)
+		informer.Run(ctx.Done())
+	}()
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		<-informerDone
+		return fmt.Errorf("sync Gadget cache: %w", ctx.Err())
+	}
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for processNext(ctx, queue, func(ctx context.Context, key types.NamespacedName) error {
+			return Reconcile(ctx, dc, client, key)
+		}, onError) {
+		}
+	}()
+	<-ctx.Done()
+	queue.ShutDown()
+	<-workerDone
+	<-informerDone
+	return nil
+}

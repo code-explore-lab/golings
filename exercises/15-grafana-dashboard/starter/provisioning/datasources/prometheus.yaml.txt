@@ -1,0 +1,9 @@
+apiVersion: 1
+datasources:
+  - name: GoPath Prometheus
+    uid: gopath-prometheus
+    type: prometheus
+    access: proxy
+    url: http://gopath-prometheus:9090
+    isDefault: true
+    editable: false

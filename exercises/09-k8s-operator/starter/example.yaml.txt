@@ -1,0 +1,7 @@
+apiVersion: learning.example.io/v1alpha1
+kind: AppPlan
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  image: nginx:1.27

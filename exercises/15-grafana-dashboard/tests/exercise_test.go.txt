@@ -1,0 +1,66 @@
+package exercise
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestGeneratedDashboard(t *testing.T) {
+	for _, uid := range []string{"gopath-prometheus", "custom_prometheus-2"} {
+		t.Run(uid, func(t *testing.T) {
+			data, err := BuildDashboard(uid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dashboard Dashboard
+			if err := json.Unmarshal(data, &dashboard); err != nil {
+				t.Fatalf("invalid dashboard JSON: %v", err)
+			}
+			if dashboard.UID != "gopath-http" || dashboard.Title != "GoPath HTTP Service" ||
+				dashboard.SchemaVersion != 39 || dashboard.Version != 1 ||
+				dashboard.Refresh != "5s" || dashboard.Time.From != "now-15m" || dashboard.Time.To != "now" {
+				t.Errorf("unexpected dashboard metadata: %+v", dashboard)
+			}
+			if len(dashboard.Panels) != 2 {
+				t.Fatalf("need request-rate and P95 panels, got %d", len(dashboard.Panels))
+			}
+			wantQueries := []string{
+				`sum by (route) (rate(gopath_http_requests_total{job="gopath-service"}[5m]))`,
+				`histogram_quantile(0.95, sum by (le, route) (rate(gopath_http_request_duration_seconds_bucket{job="gopath-service"}[5m])))`,
+			}
+			for i, panel := range dashboard.Panels {
+				if panel.ID != i+1 || panel.Type != "timeseries" || panel.Title == "" {
+					t.Errorf("panel %d needs unique positive ID, title and timeseries type: %+v", i, panel)
+				}
+				if panel.Datasource.Type != "prometheus" || panel.Datasource.UID != uid {
+					t.Errorf("panel %d must bind supplied datasource UID %q: %+v", i, uid, panel.Datasource)
+				}
+				if len(panel.Targets) != 1 || panel.Targets[0].RefID != "A" ||
+					panel.Targets[0].Expr != wantQueries[i] || panel.Targets[0].LegendFormat != "{{route}}" {
+					t.Errorf("panel %d query/legend incorrect: %+v", i, panel.Targets)
+				}
+				wantUnits := []string{"reqps", "s"}
+				if panel.FieldConfig.Defaults.Unit != wantUnits[i] {
+					t.Errorf("panel %d unit=%q, want %q", i, panel.FieldConfig.Defaults.Unit, wantUnits[i])
+				}
+				if panel.GridPos.W != 12 || panel.GridPos.H != 8 || panel.GridPos.X != i*12 || panel.GridPos.Y != 0 {
+					t.Errorf("panel %d must occupy its own half row: %+v", i, panel.GridPos)
+				}
+			}
+			again, err := BuildDashboard(uid)
+			if err != nil || !bytes.Equal(data, again) {
+				t.Errorf("identical input must produce stable provisioning JSON, err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRejectInvalidDatasourceUID(t *testing.T) {
+	for _, uid := range []string{"", " ", " leading", "trailing ", "bad/name", "has space", "中文", strings.Repeat("a", 41)} {
+		if data, err := BuildDashboard(uid); err == nil || len(data) != 0 {
+			t.Errorf("invalid UID %q must return an error and no JSON, got %q, %v", uid, data, err)
+		}
+	}
+}

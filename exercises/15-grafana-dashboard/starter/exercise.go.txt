@@ -1,0 +1,60 @@
+package exercise
+
+import "encoding/json"
+
+type Datasource struct {
+	Type string `json:"type"`
+	UID  string `json:"uid"`
+}
+
+type Target struct {
+	RefID        string `json:"refId"`
+	Expr         string `json:"expr"`
+	LegendFormat string `json:"legendFormat"`
+}
+
+type GridPosition struct {
+	H int `json:"h"`
+	W int `json:"w"`
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+type FieldDefaults struct {
+	Unit string `json:"unit"`
+}
+
+type FieldConfig struct {
+	Defaults FieldDefaults `json:"defaults"`
+}
+
+type Panel struct {
+	ID          int          `json:"id"`
+	Title       string       `json:"title"`
+	Type        string       `json:"type"`
+	Datasource  Datasource   `json:"datasource"`
+	Targets     []Target     `json:"targets"`
+	GridPos     GridPosition `json:"gridPos"`
+	FieldConfig FieldConfig  `json:"fieldConfig"`
+}
+
+type TimeRange struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+type Dashboard struct {
+	UID           string    `json:"uid"`
+	Title         string    `json:"title"`
+	SchemaVersion int       `json:"schemaVersion"`
+	Version       int       `json:"version"`
+	Refresh       string    `json:"refresh"`
+	Time          TimeRange `json:"time"`
+	Panels        []Panel   `json:"panels"`
+}
+
+// BuildDashboard generates a provisionable Grafana dashboard using this datasource UID.
+// TODO: validate UID, build the request-rate and P95 panels, then encode the model.
+func BuildDashboard(datasourceUID string) ([]byte, error) {
+	return json.Marshal(Dashboard{Panels: []Panel{}})
+}

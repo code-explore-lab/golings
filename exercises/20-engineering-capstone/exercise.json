@@ -1,0 +1,32 @@
+{
+  "id": "20-engineering-capstone",
+  "title": "Go 服务就绪检查与排空",
+  "category": "工程流程",
+  "difficulty": "进阶",
+  "description": "复现关闭时仍接受新请求的缺陷，并通过 readiness、停止准入和等待在途请求完成实现优雅排空。",
+  "objectives": [
+    "区分存活与就绪",
+    "关闭时拒绝新请求并完成在途请求",
+    "使用 context 控制等待",
+    "用同步信号写回归测试"
+  ],
+  "hints": [
+    "Gate 的 draining 与 inflight 必须在同一把锁内更新。",
+    "Wrap 在 handler 前登记请求，在 defer 中减少计数。",
+    "开始 drain 后 readiness 返回 503；最后一个在途请求退出时关闭 done 通道。"
+  ],
+  "acceptance": [
+    "正常时 readiness 为 200 且请求可通过",
+    "BeginDrain 幂等，后续请求为 503",
+    "已经进入的请求能够完成",
+    "Wait 支持取消且在排空后返回 nil",
+    "并发访问没有数据竞争"
+  ],
+  "concept": "优雅终止先退出就绪并停止准入，再等待在途工作结束。本题实现应用内门控；真实服务还应连接信号、http.Server.Shutdown 和部署的终止宽限期。",
+  "check": "go-test",
+  "prerequisites": [
+    "03-context-cancel",
+    "05-http-validation",
+    "06-structured-logging"
+  ]
+}

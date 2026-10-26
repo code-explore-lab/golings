@@ -1,0 +1,26 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"sort"
+
+	exercise "gopath/exercise/11-container-namespaces"
+)
+
+func main() {
+	items, err := exercise.ReadNamespaces("/proc/self/ns")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	keys := make([]string, 0, len(items))
+	for name := range items {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		ns := items[name]
+		fmt.Printf("%s -> %s:[%d]\n", name, ns.Kind, ns.Inode)
+	}
+}

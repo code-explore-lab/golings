@@ -1,0 +1,152 @@
+package lesson
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
+)
+
+func TestListPodsUsesNamespaceAndPropagatesErrors(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "wanted", Namespace: "learning"}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "elsewhere"}},
+	)
+	pods, err := ListPods(context.Background(), client, "learning")
+	if err != nil || len(pods) != 1 || pods[0].Name != "wanted" {
+		t.Fatalf("ListPods must request namespace learning: pods=%v error=%v", pods, err)
+	}
+	actions := client.Actions()
+	if len(actions) != 1 || actions[0].GetVerb() != "list" || actions[0].GetNamespace() != "learning" {
+		t.Fatalf("expected exactly one namespaced list, got %#v", actions)
+	}
+	want := errors.New("API unavailable")
+	client.PrependReactor("list", "pods", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, want
+	})
+	if _, err := ListPods(context.Background(), client, "learning"); !errors.Is(err, want) {
+		t.Fatalf("API errors must remain inspectable with errors.Is: %v", err)
+	}
+}
+
+func TestDeleteTombstonesAndCacheObjectsAreCopied(t *testing.T) {
+	original := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Labels: map[string]string{"source": "cache"}}}
+	for name, obj := range map[string]interface{}{
+		"direct":            original,
+		"value tombstone":   cache.DeletedFinalStateUnknown{Key: "learning/p", Obj: original},
+		"pointer tombstone": &cache.DeletedFinalStateUnknown{Key: "learning/p", Obj: original},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls int
+			podEventHandlers(func(kind string, pod *corev1.Pod) {
+				calls++
+				if kind != "delete" || pod.Name != "p" {
+					t.Errorf("unexpected event: %s %v", kind, pod)
+				}
+				pod.Labels["source"] = "consumer"
+			}).DeleteFunc(obj)
+			if calls != 1 {
+				t.Fatalf("Delete handler lost %s; expected one callback, got %d", name, calls)
+			}
+			if original.Labels["source"] != "cache" {
+				t.Fatal("callback mutated an informer-owned object")
+			}
+		})
+	}
+	var calls int
+	podEventHandlers(func(string, *corev1.Pod) { calls++ }).DeleteFunc(cache.DeletedFinalStateUnknown{Obj: "not a Pod"})
+	if calls != 0 {
+		t.Fatal("malformed tombstone should be ignored")
+	}
+}
+
+func TestObservePodsInitialListThenWatchUpdateAndDelete(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "learning", ResourceVersion: "1"},
+	})
+	watchReady := make(chan struct{})
+	var once sync.Once
+	client.PrependWatchReactor("pods", func(action clienttesting.Action) (bool, watch.Interface, error) {
+		w, err := client.Tracker().Watch(action.GetResource(), action.GetNamespace())
+		once.Do(func() { close(watchReady) })
+		return true, w, err
+	})
+	type event struct {
+		kind string
+		pod  *corev1.Pod
+	}
+	events := make(chan event, 16)
+	done := make(chan error, 1)
+	go func() {
+		done <- ObservePods(ctx, client, "learning", func(kind string, pod *corev1.Pod) {
+			events <- event{kind, pod}
+		})
+	}()
+	waitFor := func(kind, version string) {
+		t.Helper()
+		for {
+			select {
+			case got := <-events:
+				if got.kind == kind && got.pod.Name == "p" && (version == "" || got.pod.ResourceVersion == version) {
+					return
+				}
+			case err := <-done:
+				t.Fatalf("ObservePods exited before %s: %v", kind, err)
+			case <-ctx.Done():
+				t.Fatalf("timed out waiting for %s: %v", kind, ctx.Err())
+			}
+		}
+	}
+	waitFor("add", "1")
+	select {
+	case <-watchReady:
+	case <-ctx.Done():
+		t.Fatal("informer did not start its Watch after the initial List")
+	}
+	_, err := client.CoreV1().Pods("learning").Update(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "learning", ResourceVersion: "2"},
+	}, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor("update", "2")
+	if err := client.CoreV1().Pods("learning").Delete(ctx, "p", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("delete", "")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("normal shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ObservePods did not stop after context cancellation")
+	}
+	for _, action := range client.Actions() {
+		if (action.GetVerb() == "list" || action.GetVerb() == "watch") && action.GetNamespace() != "learning" {
+			t.Fatalf("informer escaped the requested namespace: %#v", action)
+		}
+	}
+}
+
+func TestObservePodsRejectsMissingNamespaceOrCallback(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if err := ObservePods(context.Background(), client, "", func(string, *corev1.Pod) {}); err == nil {
+		t.Fatal("an explicit namespace is required")
+	}
+	if err := ObservePods(context.Background(), client, "learning", nil); err == nil {
+		t.Fatal("a nil callback must be rejected before starting the informer")
+	}
+}

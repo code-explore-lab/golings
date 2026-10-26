@@ -1,0 +1,8 @@
+package exercise
+
+import "context"
+
+func WaitForCancellation(ctx context.Context) error {
+	// TODO: wait until ctx is done, then return ctx.Err().
+	return nil
+}

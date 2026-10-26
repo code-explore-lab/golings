@@ -1,0 +1,28 @@
+{
+  "id": "15-grafana-dashboard",
+  "title": "用 Go 生成 Grafana 看板并验证数据链路",
+  "category": "可观测性",
+  "difficulty": "中级",
+  "description": "用 Go 生成包含请求速率与 P95 延迟的 Grafana JSON 看板，通过 provisioning 固定数据源和看板 UID，验证 Grafana 到 Prometheus 再到 Go 服务的真实数据链路。",
+  "objectives": [
+    "用 Go 建模并生成 Grafana dashboard JSON",
+    "理解 Counter 的 rate 与 Histogram 的分位数查询",
+    "通过 Grafana 数据源代理查询真实业务指标"
+  ],
+  "hints": [
+    "看板文件使用 dashboard 本体，不是 HTTP 创建 API 的 dashboard 包装对象。所有面板绑定传入的 datasource UID。",
+    "请求速率使用 rate(counter[5m]) 后按 route 求和；Histogram 分位数聚合必须保留 le。",
+    "datasource UID 与 provisioning 的 uid 对应；数据源 URL 从 Grafana 容器访问 Prometheus，不能写宿主机 localhost。"
+  ],
+  "acceptance": [
+    "JSON 模型、UID 校验、速率与 P95 PromQL、单位和稳定输出测试通过",
+    "Go 生成的 JSON 被 Grafana 文件 provisioning 加载",
+    "真实 Grafana API 返回数据源、看板及 Prometheus up/请求计数，缺少服务时验收失败"
+  ],
+  "concept": "Go 服务负责埋点，Prometheus 抓取和查询时间序列，Grafana 展示查询结果。Counter 看增长率；Histogram 用保留 le 的 bucket 聚合计算分位数。UID 是配置之间稳定的引用，不等同于显示名称。",
+  "check": "go-test",
+  "integration": true,
+  "prerequisites": [
+    "14-prometheus-metrics"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "11-container-namespaces",
+  "title": "用 Go 观察 Linux namespace 隔离",
+  "category": "容器底层",
+  "difficulty": "中级",
+  "description": "解析 /proc/self/ns 符号链接并比较 namespace 身份，在 Linux 容器中验证隔离。",
+  "objectives": ["解析 namespace 类型与 inode", "用 Go 读取 procfs", "区分隔离视图与资源限制"],
+  "hints": ["readlink 的结果类似 pid:[4026531836]，它不是普通文件内容。", "先验证完整格式，再用 strconv.ParseUint 解析 inode；拒绝零、溢出与尾随内容。", "只有类型与 inode 都相同，两个引用才表示同一种 namespace。"],
+  "acceptance": ["Go fixture 测试全部通过", "在 Linux 主机与普通容器运行 inspect，对比 pid、net、uts 的 inode", "口述 namespace 与 cgroup 的职责差异并记录实验结果"],
+  "concept": "Linux namespace 隔离进程可见的资源视图；/proc/PID/ns 中的符号链接标识进程所属的 namespace。它不负责限制 CPU 或内存用量。",
+  "check": "go-test",
+  "integration": true,
+  "prerequisites": ["03-context-cancel"]
+}

@@ -1,0 +1,26 @@
+package exercise
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+type createUserRequest struct{ Name string }
+type createUserResponse struct{ Name string }
+
+func CreateUserHandler(w http.ResponseWriter, r *http.Request) {
+	var v createUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		http.Error(w, "invalid JSON", 400)
+		return
+	}
+	v.Name = strings.TrimSpace(v.Name)
+	if v.Name == "" {
+		http.Error(w, "name required", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(createUserResponse{Name: v.Name})
+}

@@ -1,0 +1,64 @@
+package exercise
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := WaitForCancellation(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+}
+func TestDeadline(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now())
+	defer cancel()
+	if err := WaitForCancellation(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+type observedContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (ctx *observedContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.observed) })
+	return ctx.Context.Done()
+}
+
+func TestWaitsForActiveContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observed := &observedContext{Context: ctx, observed: make(chan struct{})}
+	result := make(chan error, 1)
+	go func() { result <- WaitForCancellation(observed) }()
+	select {
+	case <-observed.observed:
+	case err := <-result:
+		t.Fatalf("returned before cancellation: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not begin waiting on the context")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("returned while the context was still active: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not finish after cancellation")
+	}
+}

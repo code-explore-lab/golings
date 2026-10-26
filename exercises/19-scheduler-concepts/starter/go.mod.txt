@@ -1,0 +1,4 @@
+module gopath/exercise/19-scheduler-concepts
+
+go 1.23
+

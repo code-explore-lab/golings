@@ -1,0 +1,75 @@
+package exercise
+
+import (
+	"context"
+	"net/http"
+	"sync"
+)
+
+type Gate struct {
+	mu       sync.Mutex
+	draining bool
+	inflight int
+	done     chan struct{}
+}
+
+func NewGate() *Gate { return &Gate{done: make(chan struct{})} }
+
+func (g *Gate) Ready(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	ready := !g.draining
+	g.mu.Unlock()
+	if !ready {
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (g *Gate) Wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		if g.draining {
+			g.mu.Unlock()
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		g.inflight++
+		g.mu.Unlock()
+		defer func() {
+			g.mu.Lock()
+			g.inflight--
+			if g.draining && g.inflight == 0 {
+				close(g.done)
+			}
+			g.mu.Unlock()
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (g *Gate) BeginDrain() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.draining {
+		return
+	}
+	g.draining = true
+	if g.inflight == 0 {
+		close(g.done)
+	}
+}
+
+func (g *Gate) Wait(ctx context.Context) error {
+	select {
+	case <-g.done:
+		return nil
+	default:
+	}
+	select {
+	case <-g.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

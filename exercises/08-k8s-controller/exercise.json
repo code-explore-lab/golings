@@ -1,0 +1,27 @@
+{
+  "id": "08-k8s-controller",
+  "title": "极简 CRD Controller：工作队列、重试与幂等调谐",
+  "category": "Kubernetes 扩展",
+  "difficulty": "进阶",
+  "description": "监听 Gadget 自定义资源，把 namespace/name 放入工作队列，再把期望消息调谐为 ConfigMap。",
+  "objectives": [
+    "用 Go 动态客户端读写自定义 API",
+    "把事件回调与 Reconcile 解耦，失败限速重试",
+    "仅更新变化字段，避免幂等循环中的无效 API 写入"
+  ],
+  "hints": [
+    "读取目标 ConfigMap；IsNotFound 时 Create，其余错误原样返回。",
+    "Data 可能为 nil；保留不归本控制器管理的键。",
+    "Data 中 message 已存在且等于期望值时直接返回 nil；失败交给 queue.AddRateLimited 重试。"
+  ],
+  "acceptance": [
+    "本地 fake API、工作队列重试、CRD informer 与幂等性单测通过",
+    "在 Minikube 手工预装 CRD 后，真实控制器响应 Gadget 创建和更新"
+  ],
+  "concept": "事件是提示，工作队列存放键；Reconcile 重新读取当前状态并使其收敛，成功后 Forget。",
+  "prerequisites": [
+    "07-k8s-client-go"
+  ],
+  "check": "go-test",
+  "integration": true
+}

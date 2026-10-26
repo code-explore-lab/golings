@@ -1,0 +1,52 @@
+package exercise
+
+type Resources struct{ MilliCPU, MemoryMiB int }
+type Node struct {
+	Name      string
+	Labels    map[string]string
+	Available Resources
+}
+type Pod struct {
+	Request  Resources
+	Selector map[string]string
+}
+
+func EligibleNodes(pod Pod, nodes []Node) []Node {
+	if pod.Request.MilliCPU < 0 || pod.Request.MemoryMiB < 0 {
+		return nil
+	}
+	var result []Node
+	for _, node := range nodes {
+		if node.Available.MilliCPU < pod.Request.MilliCPU || node.Available.MemoryMiB < pod.Request.MemoryMiB {
+			continue
+		}
+		matches := true
+		for key, value := range pod.Selector {
+			actual, ok := node.Labels[key]
+			if !ok || actual != value {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			result = append(result, node)
+		}
+	}
+	return result
+}
+
+func ChooseNode(pod Pod, nodes []Node) (string, bool) {
+	eligible := EligibleNodes(pod, nodes)
+	if len(eligible) == 0 {
+		return "", false
+	}
+	best := eligible[0]
+	for _, candidate := range eligible[1:] {
+		remaining := candidate.Available.MilliCPU - pod.Request.MilliCPU
+		bestRemaining := best.Available.MilliCPU - pod.Request.MilliCPU
+		if remaining > bestRemaining || (remaining == bestRemaining && candidate.Name < best.Name) {
+			best = candidate
+		}
+	}
+	return best.Name, true
+}

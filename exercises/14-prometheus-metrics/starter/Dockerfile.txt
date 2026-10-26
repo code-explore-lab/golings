@@ -1,0 +1,13 @@
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY exercise.go ./
+COPY cmd/ ./cmd/
+RUN CGO_ENABLED=0 go build -trimpath -o /metrics ./cmd/service
+
+FROM scratch
+COPY --from=build /metrics /metrics
+USER 65532:65532
+EXPOSE 2112
+ENTRYPOINT ["/metrics"]

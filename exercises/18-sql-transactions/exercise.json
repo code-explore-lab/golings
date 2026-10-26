@@ -1,0 +1,29 @@
+{
+  "id": "18-sql-transactions",
+  "title": "SQL 转账的原子事务",
+  "category": "后端开发",
+  "difficulty": "进阶",
+  "description": "使用 database/sql 将扣款和入账放在同一事务中，任何失败都不能留下半笔转账。",
+  "objectives": [
+    "使用 BeginTx、Commit 与 Rollback",
+    "检查 RowsAffected",
+    "保持 errors.Is 可识别的底层错误"
+  ],
+  "hints": [
+    "参数校验后 BeginTx，并立即 defer tx.Rollback()。",
+    "两次 ExecContext 都通过 tx 执行，检查每次 RowsAffected 是否为 1。",
+    "所有步骤成功才 Commit；defer Rollback 在 Commit 后只返回 ErrTxDone。"
+  ],
+  "acceptance": [
+    "成功时两账户余额同时变化且只提交一次",
+    "余额不足或目标不存在时回滚",
+    "SQL/Commit 错误向上传递",
+    "无效参数不启动事务"
+  ],
+  "concept": "事务把多个写操作组合成原子提交。测试驱动只模拟余额和事务提交，不代替真实数据库的隔离级别、锁与并发集成测试。",
+  "check": "go-test",
+  "prerequisites": [
+    "01-go-errors",
+    "02-go-injection"
+  ]
+}

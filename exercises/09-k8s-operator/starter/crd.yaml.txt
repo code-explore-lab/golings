@@ -1,0 +1,32 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: appplans.learning.example.io
+spec:
+  group: learning.example.io
+  scope: Namespaced
+  names:
+    plural: appplans
+    singular: appplan
+    kind: AppPlan
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [replicas, image]
+              properties:
+                replicas:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 2147483647
+                image:
+                  type: string
+                  minLength: 1

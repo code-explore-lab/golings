@@ -1,0 +1,20 @@
+package exercise
+
+import (
+	"net/http"
+	"sync/atomic"
+)
+
+type Health struct {
+	ready atomic.Bool
+}
+
+func (h *Health) SetReady(ready bool) {
+	// TODO: safely publish readiness to concurrent HTTP handlers.
+}
+
+func (h *Health) Handler() http.Handler {
+	// TODO: GET /livez always succeeds, GET /readyz reflects readiness.
+	// Reject unsupported methods and unknown paths as described in README.md.
+	return http.NotFoundHandler()
+}

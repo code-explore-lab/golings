@@ -1,0 +1,230 @@
+package lesson
+
+import (
+	"context"
+	"errors"
+	"math"
+	"testing"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+)
+
+func appPlan(namespace, name string, replicas int64, image string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "learning.example.io/v1alpha1", "kind": "AppPlan",
+		"metadata": map[string]interface{}{"namespace": namespace, "name": name, "uid": "plan-uid"},
+		"spec":     map[string]interface{}{"replicas": replicas, "image": image},
+	}}
+}
+func dynamicFake(objects ...runtime.Object) *fake.FakeDynamicClient {
+	return fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{appPlanGVR: "AppPlanList"}, objects...)
+}
+func writes(actions []clienttesting.Action) int {
+	total := 0
+	for _, action := range actions {
+		switch action.GetVerb() {
+		case "create", "update", "patch", "delete":
+			total++
+		}
+	}
+	return total
+}
+
+func TestReconcileCreatesOwnedDeploymentAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	plan := appPlan("learning", "demo", 2, "nginx:1.27")
+	dc, client := dynamicFake(plan), kubernetesfake.NewSimpleClientset()
+	key := types.NamespacedName{Namespace: "learning", Name: "demo"}
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := client.AppsV1().Deployments("learning").Get(ctx, "demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := metav1.GetControllerOf(deployment)
+	if owner == nil || owner.UID != plan.GetUID() || owner.Kind != "AppPlan" || owner.APIVersion != "learning.example.io/v1alpha1" ||
+		owner.Name != "demo" || owner.BlockOwnerDeletion == nil || !*owner.BlockOwnerDeletion {
+		t.Fatalf("Deployment must have an AppPlan controller owner reference: %#v", owner)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 2 ||
+		len(deployment.Spec.Template.Spec.Containers) != 1 || deployment.Spec.Template.Spec.Containers[0].Image != "nginx:1.27" ||
+		deployment.Spec.Selector.MatchLabels["app.kubernetes.io/name"] != "demo" {
+		t.Fatalf("unexpected desired Deployment: %#v", deployment.Spec)
+	}
+	client.ClearActions()
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	if n := writes(client.Actions()); n != 0 {
+		t.Fatalf("a converged reconcile must not write: %d writes", n)
+	}
+	// Repair desired fields while keeping the fields this operator does not own.
+	one := int32(1)
+	deployment.Spec.Replicas = &one
+	deployment.Spec.Template.Spec.Containers[0].Image = "wrong:latest"
+	deployment.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "KEEP", Value: "yes"}}
+	deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, corev1.Container{Name: "sidecar", Image: "busybox:1.37"})
+	deployment.Annotations = map[string]string{"keep": "yes"}
+	if _, err := client.AppsV1().Deployments("learning").Update(ctx, deployment, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err = client.AppsV1().Deployments("learning").Get(ctx, "demo", metav1.GetOptions{})
+	if err != nil || *deployment.Spec.Replicas != 2 || deployment.Spec.Template.Spec.Containers[0].Image != "nginx:1.27" ||
+		len(deployment.Spec.Template.Spec.Containers) != 2 || deployment.Spec.Template.Spec.Containers[0].Env[0].Value != "yes" || deployment.Annotations["keep"] != "yes" {
+		t.Fatalf("repair must preserve unrelated fields: object=%v error=%v", deployment, err)
+	}
+	plan.Object["spec"] = map[string]interface{}{"replicas": int64(0), "image": "nginx:1.28"}
+	if _, err := dc.Resource(appPlanGVR).Namespace("learning").Update(ctx, plan, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err = client.AppsV1().Deployments("learning").Get(ctx, "demo", metav1.GetOptions{})
+	if err != nil || *deployment.Spec.Replicas != 0 || deployment.Spec.Template.Spec.Containers[0].Image != "nginx:1.28" {
+		t.Fatalf("source changes did not converge: %v error=%v", deployment, err)
+	}
+}
+
+func TestReconcileValidatesSourceAndDoesNotAdoptOtherDeployments(t *testing.T) {
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: "learning", Name: "demo"}
+	for _, count := range []int64{-1, math.MaxInt32 + 1} {
+		client := kubernetesfake.NewSimpleClientset()
+		if err := Reconcile(ctx, dynamicFake(appPlan("learning", "demo", count, "nginx:1.27")), client, key); err == nil {
+			t.Fatalf("invalid replica count %d was accepted", count)
+		}
+		if writes(client.Actions()) != 0 {
+			t.Fatal("invalid plan caused a write")
+		}
+	}
+	for _, mutate := range []func(*unstructured.Unstructured){
+		func(p *unstructured.Unstructured) { delete(p.Object, "spec") },
+		func(p *unstructured.Unstructured) {
+			p.Object["spec"] = map[string]interface{}{"replicas": int64(1), "image": ""}
+		},
+		func(p *unstructured.Unstructured) { p.SetUID("") },
+	} {
+		plan := appPlan("learning", "demo", 1, "nginx:1.27")
+		mutate(plan)
+		if err := Reconcile(ctx, dynamicFake(plan), kubernetesfake.NewSimpleClientset(), key); err == nil {
+			t.Fatal("invalid plan should fail validation")
+		}
+	}
+	for _, owned := range []bool{false, true} {
+		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "learning"}}
+		if owned {
+			deployment.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(
+				appPlan("learning", "other", 1, "nginx:1.27"), appPlanGVK)}
+			deployment.OwnerReferences[0].UID = "another-owner"
+		}
+		client := kubernetesfake.NewSimpleClientset(deployment)
+		if err := Reconcile(ctx, dynamicFake(appPlan("learning", "demo", 1, "nginx:1.27")), client, key); err == nil {
+			t.Fatal("must refuse both unowned and foreign-owned Deployments")
+		}
+		if writes(client.Actions()) != 0 {
+			t.Fatal("refusing adoption must not write")
+		}
+	}
+	client := kubernetesfake.NewSimpleClientset()
+	if err := Reconcile(ctx, dynamicFake(), client, key); err != nil || writes(client.Actions()) != 0 {
+		t.Fatalf("deleted AppPlan must be a no-op: %v", err)
+	}
+}
+
+func TestReconcilePreservesSourceAndTargetAPIErrors(t *testing.T) {
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: "learning", Name: "demo"}
+	plan := appPlan("learning", "demo", 1, "nginx:1.27")
+	want := errors.New("API unavailable")
+	dc := dynamicFake(plan)
+	dc.PrependReactor("get", "appplans", func(clienttesting.Action) (bool, runtime.Object, error) { return true, nil, want })
+	if err := Reconcile(ctx, dc, kubernetesfake.NewSimpleClientset(), key); !errors.Is(err, want) {
+		t.Fatalf("source API error: %v", err)
+	}
+	for _, verb := range []string{"get", "create", "update"} {
+		t.Run(verb, func(t *testing.T) {
+			dc, client := dynamicFake(plan), kubernetesfake.NewSimpleClientset()
+			if verb == "update" {
+				if err := Reconcile(ctx, dc, client, key); err != nil {
+					t.Fatal(err)
+				}
+				plan := plan.DeepCopy()
+				plan.Object["spec"] = map[string]interface{}{"replicas": int64(2), "image": "nginx:1.27"}
+				dc = dynamicFake(plan)
+			}
+			client.PrependReactor(verb, "deployments", func(clienttesting.Action) (bool, runtime.Object, error) { return true, nil, want })
+			if err := Reconcile(ctx, dc, client, key); !errors.Is(err, want) {
+				t.Fatalf("target %s error: %v", verb, err)
+			}
+		})
+	}
+}
+
+func TestOperatorWatchesSourceAndRepairsDeploymentDrift(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	plan := appPlan("learning", "demo", 1, "nginx:1.27")
+	dc, client := dynamicFake(plan), kubernetesfake.NewSimpleClientset()
+	events, err := client.Tracker().Watch(appsv1.SchemeGroupVersion.WithResource("deployments"), "learning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Stop()
+	done := make(chan error, 1)
+	go func() { done <- RunOperator(ctx, dc, client, "learning", nil) }()
+	waitFor := func(replicas int32, image string) *appsv1.Deployment {
+		t.Helper()
+		for {
+			select {
+			case event := <-events.ResultChan():
+				d, ok := event.Object.(*appsv1.Deployment)
+				if ok && d.Spec.Replicas != nil && *d.Spec.Replicas == replicas && d.Spec.Template.Spec.Containers[0].Image == image {
+					return d
+				}
+			case err := <-done:
+				t.Fatalf("operator exited early: %v", err)
+			case <-ctx.Done():
+				t.Fatalf("operator failed to converge replicas=%d image=%s: %v", replicas, image, ctx.Err())
+			}
+		}
+	}
+	deployment := waitFor(1, "nginx:1.27")
+	bad := int32(99)
+	deployment.Spec.Replicas = &bad
+	deployment.ResourceVersion = "2" // fake trackers do not assign API resource versions
+	if _, err := client.AppsV1().Deployments("learning").Update(ctx, deployment, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(1, "nginx:1.27")
+	plan.Object["spec"] = map[string]interface{}{"replicas": int64(2), "image": "nginx:1.28"}
+	plan.SetResourceVersion("2")
+	if _, err := dc.Resource(appPlanGVR).Namespace("learning").Update(ctx, plan, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(2, "nginx:1.28")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("operator failed to stop")
+	}
+}

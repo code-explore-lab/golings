@@ -1,0 +1,16 @@
+package exercise
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrNotFound = errors.New("record not found")
+
+func FindUser(users map[string]string, id string) (string, error) {
+	name, ok := users[id]
+	if !ok { // TODO: wrap ErrNotFound and include id.
+		return "", fmt.Errorf("user %q: %v", id, ErrNotFound)
+	}
+	return name, nil
+}

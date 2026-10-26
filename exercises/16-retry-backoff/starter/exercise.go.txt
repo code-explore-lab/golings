@@ -1,0 +1,17 @@
+package exercise
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+type Waiter func(context.Context, time.Duration) error
+
+func Retry(ctx context.Context, attempts int, baseDelay time.Duration, operation func(context.Context) error, wait Waiter) error {
+	// TODO: validate arguments, retry with bounded exponential backoff, and honor cancellation.
+	if operation == nil {
+		return errors.New("operation is required")
+	}
+	return operation(ctx)
+}

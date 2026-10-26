@@ -1,0 +1,53 @@
+package exercise
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+type Namespace struct {
+	Kind  string
+	Inode uint64
+}
+
+var namespaceLink = regexp.MustCompile(`^([a-z][a-z0-9_]*):\[([0-9]+)\]$`)
+
+func ParseNamespaceLink(link string) (Namespace, error) {
+	parts := namespaceLink.FindStringSubmatch(strings.TrimSpace(link))
+	if parts == nil {
+		return Namespace{}, fmt.Errorf("invalid namespace link %q", link)
+	}
+	inode, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil || inode == 0 {
+		return Namespace{}, fmt.Errorf("invalid namespace inode %q", parts[2])
+	}
+	return Namespace{Kind: parts[1], Inode: inode}, nil
+}
+
+func SameNamespace(a, b Namespace) bool {
+	return a.Kind == b.Kind && a.Inode == b.Inode
+}
+
+func ReadNamespaces(dir string) (map[string]Namespace, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read namespace directory: %w", err)
+	}
+	out := make(map[string]Namespace, len(entries))
+	for _, entry := range entries {
+		link, err := os.Readlink(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read namespace %s: %w", entry.Name(), err)
+		}
+		ns, err := ParseNamespaceLink(link)
+		if err != nil {
+			return nil, fmt.Errorf("parse namespace %s: %w", entry.Name(), err)
+		}
+		out[entry.Name()] = ns
+	}
+	return out, nil
+}

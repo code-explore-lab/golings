@@ -1,0 +1,92 @@
+package lesson
+
+import (
+	"context"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	coreinformers "k8s.io/client-go/informers/core/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
+)
+
+// ClientFromKubeconfig is useful in a command-line program. Integration tests
+// additionally verify that the selected kubeconfig context is exactly minikube.
+func ClientFromKubeconfig(path string) (kubernetes.Interface, error) {
+	config, err := clientcmd.BuildConfigFromFlags("", path)
+	if err != nil {
+		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+	return kubernetes.NewForConfig(config)
+}
+
+// ListPods makes one namespaced API request. It does not read an informer cache.
+func ListPods(ctx context.Context, client kubernetes.Interface, namespace string) ([]corev1.Pod, error) {
+	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list Pods: %w", err)
+	}
+	return list.Items, nil
+}
+
+// podFromEvent handles a real object and the tombstone a Delete handler can
+// receive when the watch missed the final state. Never mutate informer objects.
+func podFromEvent(obj interface{}) (*corev1.Pod, bool) {
+	switch value := obj.(type) {
+	case *corev1.Pod:
+		if value != nil {
+			return value.DeepCopy(), true
+		}
+	case cache.DeletedFinalStateUnknown:
+		return podFromEvent(value.Obj)
+	case *cache.DeletedFinalStateUnknown:
+		if value != nil {
+			return podFromEvent(value.Obj)
+		}
+	}
+	return nil, false
+}
+
+func podEventHandlers(onEvent func(string, *corev1.Pod)) cache.ResourceEventHandlerFuncs {
+	emit := func(kind string, obj interface{}) {
+		if pod, ok := podFromEvent(obj); ok {
+			onEvent(kind, pod)
+		}
+	}
+	return cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { emit("add", obj) },
+		UpdateFunc: func(_, current interface{}) { emit("update", current) },
+		DeleteFunc: func(obj interface{}) { emit("delete", obj) },
+	}
+}
+
+// ObservePods performs the initial List, then keeps a Watch and local cache.
+// Callbacks must return promptly; work requiring retries belongs in a queue.
+func ObservePods(ctx context.Context, client kubernetes.Interface, namespace string, onEvent func(string, *corev1.Pod)) error {
+	if namespace == "" || onEvent == nil {
+		return fmt.Errorf("a namespace and event callback are required")
+	}
+	informer := coreinformers.NewFilteredPodInformer(client, namespace, 0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, nil)
+	if _, err := informer.AddEventHandler(podEventHandlers(onEvent)); err != nil {
+		return fmt.Errorf("register handler: %w", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		informer.Run(ctx.Done())
+	}()
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		<-done
+		// Events can arrive before WaitForCacheSync's next polling tick.
+		if informer.HasSynced() {
+			return nil
+		}
+		return fmt.Errorf("sync Pod cache: %w", ctx.Err())
+	}
+	<-ctx.Done()
+	<-done
+	return nil
+}

@@ -1,0 +1,120 @@
+package exercise
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func readiness(g *Gate) int {
+	response := httptest.NewRecorder()
+	g.Ready(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	return response.Code
+}
+
+func TestReadyAndEmptyDrain(t *testing.T) {
+	g := NewGate()
+	if got := readiness(g); got != http.StatusOK {
+		t.Fatalf("initial readiness=%d", got)
+	}
+	g.BeginDrain()
+	g.BeginDrain()
+	if got := readiness(g); got != http.StatusServiceUnavailable {
+		t.Fatalf("draining readiness=%d", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := g.Wait(ctx); err != nil {
+		t.Fatalf("already drained gate must return nil: %v", err)
+	}
+}
+
+func TestDrainKeepsExistingRequestAndRejectsNewOnes(t *testing.T) {
+	g := NewGate()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var calls atomic.Int64
+	handler := g.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	first := httptest.NewRecorder()
+	go func() { defer close(finished); handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/", nil)) }()
+	// A timeout is only a deadlock guard; channel signals establish ordering.
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("first handler never entered")
+	}
+	g.BeginDrain()
+	if got := readiness(g); got != http.StatusServiceUnavailable {
+		t.Errorf("readiness=%d", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := g.Wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Wait returned before active request ended: %v", err)
+	}
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/new", nil))
+	if second.Code != http.StatusServiceUnavailable {
+		t.Errorf("new request status=%d", second.Code)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("business handler admitted %d requests", calls.Load())
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("existing request could not finish")
+	}
+	if first.Code != http.StatusNoContent {
+		t.Errorf("existing request status=%d", first.Code)
+	}
+	waitCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	if err := g.Wait(waitCtx); err != nil {
+		t.Fatalf("drain did not complete: %v", err)
+	}
+}
+
+func TestWaitCancellationBeforeDrain(t *testing.T) {
+	g := NewGate()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := g.Wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait returned %v", err)
+	}
+}
+
+func TestConcurrentAdmissionAndDrain(t *testing.T) {
+	g := NewGate()
+	handler := g.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+			readiness(g)
+			g.BeginDrain()
+		}()
+	}
+	wg.Wait()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := g.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

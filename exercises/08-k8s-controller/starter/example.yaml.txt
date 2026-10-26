@@ -1,0 +1,6 @@
+apiVersion: learning.example.io/v1alpha1
+kind: Gadget
+metadata:
+  name: demo
+spec:
+  message: hello from the Go controller

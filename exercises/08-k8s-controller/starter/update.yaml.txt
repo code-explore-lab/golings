@@ -1,0 +1,2 @@
+spec:
+  message: changed by a custom-resource update

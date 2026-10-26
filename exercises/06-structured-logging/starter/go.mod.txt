@@ -1,0 +1,3 @@
+module gopath/exercise/06-structured-logging
+
+go 1.27

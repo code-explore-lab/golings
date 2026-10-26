@@ -1,0 +1,59 @@
+package exercise
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+)
+
+func TestReadinessAndLivenessAreDifferent(t *testing.T) {
+	health := &Health{}
+	handler := health.Handler()
+	assertStatus := func(method, path string, want int) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(method, path, nil))
+		if recorder.Code != want {
+			t.Fatalf("%s %s status=%d, want %d", method, path, recorder.Code, want)
+		}
+	}
+	assertStatus(http.MethodGet, "/readyz", http.StatusServiceUnavailable)
+	assertStatus(http.MethodGet, "/livez", http.StatusOK)
+	health.SetReady(true)
+	assertStatus(http.MethodGet, "/readyz", http.StatusOK)
+	health.SetReady(false)
+	assertStatus(http.MethodGet, "/readyz", http.StatusServiceUnavailable)
+	assertStatus(http.MethodGet, "/livez", http.StatusOK)
+	assertStatus(http.MethodGet, "/missing", http.StatusNotFound)
+	assertStatus(http.MethodPost, "/livez", http.StatusMethodNotAllowed)
+	assertStatus(http.MethodPost, "/readyz", http.StatusMethodNotAllowed)
+}
+
+func TestReadinessConcurrentAccess(t *testing.T) {
+	health := &Health{}
+	handler := health.Handler()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				health.SetReady(j%2 == 0)
+				r := httptest.NewRecorder()
+				handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+				if r.Code != http.StatusOK && r.Code != http.StatusServiceUnavailable {
+					t.Errorf("readiness status=%d", r.Code)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	health.SetReady(true)
+	r := httptest.NewRecorder()
+	handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("final readiness status=%d", r.Code)
+	}
+}

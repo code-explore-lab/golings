@@ -1,0 +1,27 @@
+{
+  "id": "09-k8s-operator",
+  "title": "Operator：AppPlan CRD + Reconcile + Deployment 所有权",
+  "category": "Kubernetes 扩展",
+  "difficulty": "进阶",
+  "description": "把 AppPlan 的副本数和镜像调谐为具有 ownerReference 的 Deployment，监听子资源以修复漂移。",
+  "objectives": [
+    "理解 Operator 是领域 CRD 与 Controller 的组合",
+    "实现可重复执行的 Reconcile 并拒绝接管外部资源",
+    "用 ownerReference 表达垃圾回收关系，观察子资源漂移"
+  ],
+  "hints": [
+    "用 metav1.NewControllerRef(plan, appPlanGVK) 创建 Deployment 的控制器引用。",
+    "现有 Deployment 必须由同 UID 的 AppPlan 控制；不要接管无主或外部资源。",
+    "只修改本控制器拥有的副本数、app 标签与 app 容器镜像；已收敛则不 Update。"
+  ],
+  "acceptance": [
+    "本地验证 Deployment 期望状态、所有权、API 错误、幂等性和异步漂移修复",
+    "Minikube 预装 CRD 后验证真实 ownerReference、子资源漂移修复与垃圾回收"
+  ],
+  "concept": "Operator 通过领域对象描述期望状态；父子资源事件都只触发同一个 Reconcile。ownerReference 不等于 finalizer。",
+  "prerequisites": [
+    "08-k8s-controller"
+  ],
+  "check": "go-test",
+  "integration": true
+}

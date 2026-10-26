@@ -1,0 +1,1 @@
+{"id":"01-go-errors","title":"错误包装与判断","category":"Go 基础","difficulty":"入门","description":"实现用户查找函数，并在未找到时返回可被 errors.Is 判断的错误。","objectives":["理解错误是值","使用 %w 包装错误","通过 errors.Is 判断错误链"],"hints":["定义稳定的哨兵错误。","fmt.Errorf 使用 %w 保留底层错误。","调用方应使用 errors.Is 而不是比较文本。"],"acceptance":["成功查找返回名称且无错误","缺失用户返回错误","错误包装可被 errors.Is 识别"],"concept":"错误链在添加上下文时保留底层错误身份。","check":"go-test"}

@@ -1,0 +1,93 @@
+package exercise
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+)
+
+type Datasource struct {
+	Type string `json:"type"`
+	UID  string `json:"uid"`
+}
+
+type Target struct {
+	RefID        string `json:"refId"`
+	Expr         string `json:"expr"`
+	LegendFormat string `json:"legendFormat"`
+}
+
+type GridPosition struct {
+	H int `json:"h"`
+	W int `json:"w"`
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+type FieldDefaults struct {
+	Unit string `json:"unit"`
+}
+
+type FieldConfig struct {
+	Defaults FieldDefaults `json:"defaults"`
+}
+
+type Panel struct {
+	ID          int          `json:"id"`
+	Title       string       `json:"title"`
+	Type        string       `json:"type"`
+	Datasource  Datasource   `json:"datasource"`
+	Targets     []Target     `json:"targets"`
+	GridPos     GridPosition `json:"gridPos"`
+	FieldConfig FieldConfig  `json:"fieldConfig"`
+}
+
+type TimeRange struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+type Dashboard struct {
+	UID           string    `json:"uid"`
+	Title         string    `json:"title"`
+	SchemaVersion int       `json:"schemaVersion"`
+	Version       int       `json:"version"`
+	Refresh       string    `json:"refresh"`
+	Time          TimeRange `json:"time"`
+	Panels        []Panel   `json:"panels"`
+}
+
+func BuildDashboard(datasourceUID string) ([]byte, error) {
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`).MatchString(datasourceUID) {
+		return nil, fmt.Errorf("datasource UID must contain 1–40 ASCII letters, digits, underscores or hyphens")
+	}
+	ds := Datasource{Type: "prometheus", UID: datasourceUID}
+	dashboard := Dashboard{
+		UID: "gopath-http", Title: "GoPath HTTP Service",
+		SchemaVersion: 39, Version: 1, Refresh: "5s",
+		Time: TimeRange{From: "now-15m", To: "now"},
+		Panels: []Panel{
+			{
+				ID: 1, Title: "Request rate", Type: "timeseries", Datasource: ds,
+				Targets: []Target{{
+					RefID:        "A",
+					Expr:         `sum by (route) (rate(gopath_http_requests_total{job="gopath-service"}[5m]))`,
+					LegendFormat: "{{route}}",
+				}},
+				GridPos:     GridPosition{H: 8, W: 12, X: 0, Y: 0},
+				FieldConfig: FieldConfig{Defaults: FieldDefaults{Unit: "reqps"}},
+			},
+			{
+				ID: 2, Title: "P95 latency", Type: "timeseries", Datasource: ds,
+				Targets: []Target{{
+					RefID:        "A",
+					Expr:         `histogram_quantile(0.95, sum by (le, route) (rate(gopath_http_request_duration_seconds_bucket{job="gopath-service"}[5m])))`,
+					LegendFormat: "{{route}}",
+				}},
+				GridPos:     GridPosition{H: 8, W: 12, X: 12, Y: 0},
+				FieldConfig: FieldConfig{Defaults: FieldDefaults{Unit: "s"}},
+			},
+		},
+	}
+	return json.MarshalIndent(dashboard, "", "  ")
+}

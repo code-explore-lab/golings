@@ -1,0 +1,124 @@
+//go:build integration
+
+package exercise
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestIntegrationMinikubeWorkload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	get := func(resource string, out any) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "kubectl", "--context", "minikube", "-n", "gopath-workloads", "get", resource, "-o", "json")
+		data, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("read %s: %v\n%s\nDeploy manifests in the minikube context first; see README.md.", resource, err, data)
+		}
+		if err := json.Unmarshal(data, out); err != nil {
+			t.Fatalf("decode %s: %v", resource, err)
+		}
+	}
+	var deployment struct {
+		Metadata struct{ Generation int64 }
+		Spec     struct {
+			Replicas int
+			Template struct {
+				Metadata struct{ Labels map[string]string }
+				Spec     struct {
+					Containers []struct {
+						ReadinessProbe struct{ HTTPGet struct{ Path string } }
+						LivenessProbe  struct{ HTTPGet struct{ Path string } }
+						Resources      struct {
+							Requests map[string]string
+							Limits   map[string]string
+						}
+					}
+				}
+			}
+		}
+		Status struct {
+			ObservedGeneration int64
+			ReadyReplicas      int
+			UpdatedReplicas    int
+		}
+	}
+	get("deployment/gopath-health", &deployment)
+	if deployment.Spec.Replicas != 2 || deployment.Status.ReadyReplicas != 2 || deployment.Status.UpdatedReplicas != 2 || deployment.Status.ObservedGeneration < deployment.Metadata.Generation {
+		t.Fatalf("deployment has not converged to two updated ready replicas: %+v", deployment.Status)
+	}
+	if len(deployment.Spec.Template.Spec.Containers) != 1 {
+		t.Fatal("expected one Go service container")
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if container.ReadinessProbe.HTTPGet.Path != "/readyz" || container.LivenessProbe.HTTPGet.Path != "/livez" {
+		t.Fatal("deployment must configure distinct /readyz and /livez probes")
+	}
+	for _, resource := range []string{"cpu", "memory"} {
+		if container.Resources.Requests[resource] == "" || container.Resources.Limits[resource] == "" {
+			t.Fatalf("missing %s requests or limits", resource)
+		}
+	}
+	var service struct {
+		Spec struct {
+			Selector map[string]string
+			Ports    []struct{ Port int }
+		}
+	}
+	get("service/gopath-health", &service)
+	if service.Spec.Selector["app"] != "gopath-health" || deployment.Spec.Template.Metadata.Labels["app"] != "gopath-health" || len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Port != 80 {
+		t.Fatal("Service must select the deployment pods and expose port 80")
+	}
+	var slices struct {
+		Items []struct {
+			Metadata  struct{ Labels map[string]string }
+			Endpoints []struct {
+				Addresses  []string
+				Conditions struct{ Ready *bool }
+			}
+		}
+	}
+	get("endpointslices", &slices)
+	addresses := map[string]bool{}
+	for _, slice := range slices.Items {
+		if slice.Metadata.Labels["kubernetes.io/service-name"] != "gopath-health" {
+			continue
+		}
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
+				for _, address := range endpoint.Addresses {
+					addresses[address] = true
+				}
+			}
+		}
+	}
+	if len(addresses) < 2 {
+		t.Fatalf("Service has %d ready endpoint addresses; want at least two", len(addresses))
+	}
+	base := strings.TrimRight(os.Getenv("GOPATH_HEALTH_URL"), "/")
+	if base == "" {
+		base = "http://127.0.0.1:18080"
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, path := range []string{"/readyz", "/livez"} {
+		response, err := client.Get(base + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v; start kubectl port-forward service/gopath-health 18080:80", path, err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 1024))
+		response.Body.Close()
+		if readErr != nil || response.StatusCode != http.StatusOK || string(body) != "ok\n" {
+			t.Fatal(fmt.Sprintf("GET %s status=%d body=%q error=%v", path, response.StatusCode, body, readErr))
+		}
+	}
+}

@@ -1,0 +1,28 @@
+{
+  "id": "17-rate-limiter",
+  "title": "单进程令牌桶限流",
+  "category": "分布式基础",
+  "difficulty": "基础",
+  "description": "实现线程安全的令牌桶，以注入时间验证补充速率和突发容量。",
+  "objectives": [
+    "区分速率和突发容量",
+    "保留不足一个周期的时间",
+    "保护共享令牌状态"
+  ],
+  "hints": [
+    "初始令牌数等于容量，每次 Allow 消耗一个令牌。",
+    "使用 now.Sub(last)/refillEvery 计算整周期，last 只推进整周期。",
+    "用 mutex 保护补充与消耗；时钟倒退时不补充、不回退 last。"
+  ],
+  "acceptance": [
+    "初始突发不超过 capacity",
+    "每个完整周期补充一个令牌且不超过容量",
+    "部分周期不丢失，倒退时间不增加令牌",
+    "并发调用不超发"
+  ],
+  "concept": "令牌桶允许有限突发并限制长期速率。本题是单进程模型；多个服务副本需要额外的全局限流设计。",
+  "check": "go-test",
+  "prerequisites": [
+    "04-worker-pool"
+  ]
+}

@@ -1,0 +1,44 @@
+package exercise
+
+import (
+	"errors"
+	"sync"
+	"time"
+)
+
+type TokenBucket struct {
+	mu          sync.Mutex
+	capacity    int
+	tokens      int
+	refillEvery time.Duration
+	last        time.Time
+}
+
+func NewTokenBucket(capacity int, refillEvery time.Duration, now time.Time) (*TokenBucket, error) {
+	if capacity < 1 || refillEvery <= 0 {
+		return nil, errors.New("capacity and refill interval must be positive")
+	}
+	return &TokenBucket{capacity: capacity, tokens: capacity, refillEvery: refillEvery, last: now}, nil
+}
+
+func (b *TokenBucket) Allow(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.After(b.last) {
+		periods := now.Sub(b.last) / b.refillEvery
+		if periods > 0 {
+			missing := b.capacity - b.tokens
+			if periods >= time.Duration(missing) {
+				b.tokens = b.capacity
+			} else {
+				b.tokens += int(periods)
+			}
+			b.last = b.last.Add(periods * b.refillEvery)
+		}
+	}
+	if b.tokens == 0 {
+		return false
+	}
+	b.tokens--
+	return true
+}

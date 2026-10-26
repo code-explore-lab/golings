@@ -1,0 +1,129 @@
+//go:build integration
+
+package exercise
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestIntegrationGrafanaProvisioningAndDatasource(t *testing.T) {
+	env := func(name, fallback string) string {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+		return fallback
+	}
+	base := strings.TrimRight(env("GOPATH_GRAFANA_URL", "http://127.0.0.1:3000"), "/")
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		t.Fatal("GOPATH_GRAFANA_URL must be an absolute HTTP(S) URL to the learning Grafana")
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	get := func(path string, into any) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.SetBasicAuth(env("GOPATH_GRAFANA_USER", "admin"), env("GOPATH_GRAFANA_PASSWORD", "gopath-learning"))
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Grafana request failed: %v; generate dashboard JSON and run docker compose up -d; see README", err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("Grafana %s returned %s: %.500s; verify local credentials, provisioning and exercise 14 services", path, response.Status, body)
+		}
+		if err := json.Unmarshal(body, into); err != nil {
+			t.Fatalf("Grafana %s returned invalid JSON: %v", path, err)
+		}
+	}
+
+	var health struct{ Database string }
+	get("/api/health", &health)
+	if health.Database != "ok" {
+		t.Fatalf("Grafana database is not ready: %q; inspect docker compose logs grafana", health.Database)
+	}
+	var datasource struct{ UID, Type, URL string }
+	get("/api/datasources/uid/gopath-prometheus", &datasource)
+	if datasource.UID != "gopath-prometheus" || datasource.Type != "prometheus" ||
+		datasource.URL != "http://gopath-prometheus:9090" {
+		t.Fatalf("unexpected provisioned datasource: %+v; use supplied provisioning files and exercise 14 Docker network", datasource)
+	}
+	var loaded struct{ Dashboard Dashboard }
+	get("/api/dashboards/uid/gopath-http", &loaded)
+	expectedJSON, err := BuildDashboard("gopath-prometheus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected Dashboard
+	if err := json.Unmarshal(expectedJSON, &expected); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Dashboard.UID != "gopath-http" || loaded.Dashboard.Title != "GoPath HTTP Service" || len(loaded.Dashboard.Panels) != 2 {
+		t.Fatalf("Go-generated dashboard not provisioned: %+v; run go run ./cmd/dashboard and wait at least 5 seconds", loaded.Dashboard)
+	}
+	if len(expected.Panels) != 2 {
+		t.Fatal("BuildDashboard must generate two panels before integration can be checked")
+	}
+	for i, panel := range loaded.Dashboard.Panels {
+		if panel.Datasource.UID != "gopath-prometheus" || panel.Type != "timeseries" ||
+			len(panel.Targets) != 1 || panel.Targets[0].Expr != expected.Panels[i].Targets[0].Expr {
+			t.Fatalf("loaded panel %d differs from Go-generated dashboard: %+v; regenerate JSON and wait for provisioning", i, panel)
+		}
+	}
+
+	for _, check := range []struct {
+		query   string
+		minimum float64
+	}{
+		{`up{job="gopath-service"}`, 1},
+		{`sum(gopath_http_requests_total{job="gopath-service",route="/work",status="200"})`, 1},
+		{expected.Panels[0].Targets[0].Expr, 0},
+		{expected.Panels[1].Targets[0].Expr, 0},
+	} {
+		query := check.query
+		var result struct {
+			Status string
+			Error  string
+			Data   struct {
+				ResultType string
+				Result     []struct {
+					Value []json.RawMessage
+				}
+			}
+		}
+		get("/api/datasources/proxy/uid/gopath-prometheus/api/v1/query?"+url.Values{"query": {query}}.Encode(), &result)
+		if result.Status != "success" || result.Data.ResultType != "vector" || len(result.Data.Result) == 0 {
+			t.Fatalf("Grafana datasource query %q returned no live series (%s %s); keep exercise 14 services running, request /work and wait for Prometheus scraping", query, result.Status, result.Error)
+		}
+		for _, sample := range result.Data.Result {
+			if len(sample.Value) != 2 {
+				t.Fatalf("invalid Prometheus sample for %q: %s", query, fmt.Sprint(sample.Value))
+			}
+			var raw string
+			if err := json.Unmarshal(sample.Value[1], &raw); err != nil {
+				t.Fatalf("invalid sample value: %v", err)
+			}
+			value, err := strconv.ParseFloat(raw, 64)
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < check.minimum {
+				t.Fatalf("Grafana datasource query %q=%q; require an UP target, real /work traffic and two scrape samples for rate/P95", query, raw)
+			}
+		}
+	}
+	t.Log("Grafana loaded the Go-generated dashboard and queried live Go metrics through its Prometheus datasource")
+}

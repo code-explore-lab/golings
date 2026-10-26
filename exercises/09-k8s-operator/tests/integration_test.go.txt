@@ -1,0 +1,181 @@
+//go:build integration
+
+package lesson
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+)
+
+// This helper refuses existing namespaces, including a GOPATH_NAMESPACE value:
+// it may only remove a namespace that this test itself created successfully.
+func integrationNamespace(t *testing.T) (context.Context, kubernetes.Interface, string) {
+	t.Helper()
+	if os.Getenv("GOPATH_INTEGRATION") != "1" {
+		t.Fatal("run gopath check 09-k8s-operator --integration, or set GOPATH_INTEGRATION=1 explicitly")
+	}
+	loading := clientcmd.NewDefaultClientConfigLoadingRules()
+	raw, err := loading.Load()
+	if err != nil {
+		t.Fatalf("read kubeconfig: %v; start minikube and configure KUBECONFIG", err)
+	}
+	if raw.CurrentContext != "minikube" || raw.Contexts["minikube"] == nil {
+		t.Fatal("integration requires kubeconfig current-context=minikube; run kubectl config use-context minikube")
+	}
+	config, err := clientcmd.NewNonInteractiveClientConfig(*raw, "minikube", &clientcmd.ConfigOverrides{}, loading).ClientConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Timeout = 15 * time.Second
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	name := os.Getenv("GOPATH_NAMESPACE")
+	if name != "" && !strings.HasPrefix(name, "gopath-") {
+		t.Fatal("GOPATH_NAMESPACE must start with gopath- and must not exist yet")
+	}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if name == "" {
+		ns.GenerateName = "gopath-09-"
+	}
+	created, err := client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create isolated test namespace (never reuse an existing namespace): %v", err)
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
+		defer stop()
+		if err := client.CoreV1().Namespaces().Delete(cleanup, created.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &created.UID},
+		}); err != nil {
+			t.Errorf("cleanup only test-created namespace %s: %v", created.Name, err)
+		}
+	})
+	return ctx, client, created.Name
+}
+
+func TestIntegrationAppPlanOperatorOnMinikube(t *testing.T) {
+	ctx, client, namespace := integrationNamespace(t)
+	loading := clientcmd.NewDefaultClientConfigLoadingRules()
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loading,
+		&clientcmd.ConfigOverrides{CurrentContext: "minikube"}).ClientConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Timeout = 15 * time.Second
+	dc, err := dynamic.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dc.Resource(appPlanGVR).Namespace(namespace).List(ctx, metav1.ListOptions{}); err != nil {
+		t.Fatalf("AppPlan API unavailable: %v; first run kubectl --context minikube apply -f crd.yaml and wait for Established", err)
+	}
+	operatorCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- RunOperator(operatorCtx, dc, client, namespace, func(err error) { t.Logf("retry: %v", err) })
+	}()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("operator shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("operator did not shut down")
+		}
+	})
+	// A zero-replica Deployment tests API reconciliation without requiring an
+	// image download. Readiness and application behavior are separate exercises.
+	plan := appPlan(namespace, "demo", 0, "nginx:1.27")
+	plan.SetUID("") // the API server, not the test, assigns the real owner UID
+	plan, err = dc.Resource(appPlanGVR).Namespace(namespace).Create(ctx, plan, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForReplicas := func(want int32) *appsv1.Deployment {
+		t.Helper()
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, "demo", metav1.GetOptions{})
+			if err == nil && deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == want {
+				return deployment
+			}
+			if err != nil && !apierrors.IsNotFound(err) {
+				t.Fatal(err)
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("operator did not converge to %d replicas: %v", want, ctx.Err())
+			case <-tick.C:
+			}
+		}
+	}
+	deployment := waitForReplicas(0)
+	owner := metav1.GetControllerOf(deployment)
+	if owner == nil || owner.UID != plan.GetUID() || owner.Kind != "AppPlan" || owner.Name != "demo" {
+		t.Fatalf("real Deployment has wrong owner reference: %#v", owner)
+	}
+	key := types.NamespacedName{Namespace: namespace, Name: "demo"}
+	beforeGeneration := deployment.Generation
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err = client.AppsV1().Deployments(namespace).Get(ctx, "demo", metav1.GetOptions{})
+	// Native Deployment controllers legitimately write status/resourceVersion.
+	// Generation and our owned spec must stay stable; the offline test checks
+	// the stronger assertion that Reconcile makes absolutely no API write.
+	if err != nil || deployment.Generation != beforeGeneration || deployment.Spec.Replicas == nil ||
+		*deployment.Spec.Replicas != 0 || len(deployment.Spec.Template.Spec.Containers) == 0 ||
+		deployment.Spec.Template.Spec.Containers[0].Image != "nginx:1.27" {
+		t.Fatalf("unchanged Reconcile changed desired spec/generation: object=%v error=%v", deployment, err)
+	}
+	// Patch only the desired replica count; an independent status update must
+	// not cause a resourceVersion conflict in this deliberate drift injection.
+	if _, err := client.AppsV1().Deployments(namespace).Patch(ctx, "demo", types.MergePatchType,
+		[]byte("{\"spec\":{\"replicas\":1}}"), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForReplicas(0) // only the child changed: the child informer must repair it
+	plan.Object["spec"] = map[string]interface{}{"replicas": int64(1), "image": "nginx:1.27"}
+	if _, err := dc.Resource(appPlanGVR).Namespace(namespace).Update(ctx, plan, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitForReplicas(1)
+	if err := dc.Resource(appPlanGVR).Namespace(namespace).Delete(ctx, plan.GetName(), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		_, err := client.AppsV1().Deployments(namespace).Get(ctx, "demo", metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("owner garbage collection did not delete the test-owned Deployment")
+		case <-tick.C:
+		}
+	}
+}

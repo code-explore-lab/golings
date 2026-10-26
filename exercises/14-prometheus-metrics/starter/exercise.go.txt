@@ -1,0 +1,39 @@
+package exercise
+
+import (
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+type Metrics struct {
+	registry *prometheus.Registry
+	requests *prometheus.CounterVec
+	duration *prometheus.HistogramVec
+}
+
+func NewMetrics() *Metrics {
+	m := &Metrics{
+		registry: prometheus.NewRegistry(),
+		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gopath_http_requests_total", Help: "Number of completed HTTP requests.",
+		}, []string{"method", "route", "status"}),
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "gopath_http_request_duration_seconds", Help: "HTTP request duration in seconds.",
+			Buckets: []float64{0.005, 0.01, 0.05, 0.1, 0.5, 1},
+		}, []string{"method", "route"}),
+	}
+	// TODO: register collectors with this instance's registry.
+	return m
+}
+
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
+func (m *Metrics) Instrument(route string, next http.Handler) http.Handler {
+	// TODO: preserve the response, count completed requests, observe duration.
+	// route is a fixed template supplied by the router, never r.URL.String().
+	return next
+}

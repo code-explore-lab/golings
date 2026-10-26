@@ -1,0 +1,3 @@
+module gopath/exercise/12-container-cgroups
+
+go 1.23.0

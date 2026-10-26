@@ -1,0 +1,49 @@
+package exercise
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+var ErrInsufficientFunds = errors.New("source account missing or insufficient balance")
+var ErrAccountNotFound = errors.New("destination account not found")
+
+func Transfer(ctx context.Context, db *sql.DB, from, to string, amount int64) error {
+	if db == nil || amount <= 0 || strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" || from == to {
+		return errors.New("invalid transfer")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transfer: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "UPDATE accounts SET balance = balance - ? WHERE id = ? AND balance >= ?", amount, from, amount)
+	if err != nil {
+		return fmt.Errorf("debit account: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("debit row count: %w", err)
+	}
+	if affected != 1 {
+		return ErrInsufficientFunds
+	}
+	result, err = tx.ExecContext(ctx, "UPDATE accounts SET balance = balance + ? WHERE id = ?", amount, to)
+	if err != nil {
+		return fmt.Errorf("credit account: %w", err)
+	}
+	affected, err = result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("credit row count: %w", err)
+	}
+	if affected != 1 {
+		return ErrAccountNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transfer: %w", err)
+	}
+	return nil
+}

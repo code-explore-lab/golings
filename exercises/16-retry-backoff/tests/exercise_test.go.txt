@@ -1,0 +1,93 @@
+package exercise
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+	"time"
+)
+
+func TestRetrySuccessAndBackoff(t *testing.T) {
+	failure := errors.New("temporary")
+	calls := 0
+	var delays []time.Duration
+	ctx := context.WithValue(context.Background(), "test", "value")
+	err := Retry(ctx, 4, 10*time.Millisecond, func(received context.Context) error {
+		if received != ctx {
+			t.Fatal("operation did not receive original context")
+		}
+		calls++
+		if calls < 3 {
+			return failure
+		}
+		return nil
+	}, func(received context.Context, delay time.Duration) error {
+		if received != ctx {
+			t.Fatal("wait did not receive original context")
+		}
+		delays = append(delays, delay)
+		return nil
+	})
+	if err != nil || calls != 3 || !reflect.DeepEqual(delays, []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}) {
+		t.Fatalf("err=%v calls=%d delays=%v", err, calls, delays)
+	}
+}
+
+func TestRetryExhaustedAndImmediateSuccess(t *testing.T) {
+	last := errors.New("unavailable")
+	calls, waits := 0, 0
+	err := Retry(context.Background(), 3, 0, func(context.Context) error { calls++; return last }, func(context.Context, time.Duration) error { waits++; return nil })
+	if !errors.Is(err, last) || calls != 3 || waits != 2 {
+		t.Fatalf("err=%v calls=%d waits=%d", err, calls, waits)
+	}
+	waits = 0
+	err = Retry(context.Background(), 5, time.Second, func(context.Context) error { return nil }, func(context.Context, time.Duration) error { waits++; return nil })
+	if err != nil || waits != 0 {
+		t.Fatalf("immediate success err=%v waits=%d", err, waits)
+	}
+}
+
+func TestRetryCancellationAndWaitError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	err := Retry(ctx, 3, 0, func(context.Context) error { calls++; return nil }, func(context.Context, time.Duration) error { return nil })
+	if !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+	waitErr := errors.New("wait interrupted")
+	err = Retry(context.Background(), 3, 0, func(context.Context) error { return errors.New("retry") }, func(context.Context, time.Duration) error { return waitErr })
+	if !errors.Is(err, waitErr) {
+		t.Fatalf("got %v, want wait error", err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	calls = 0
+	err = Retry(ctx, 3, 0, func(context.Context) error { calls++; return errors.New("again") }, func(context.Context, time.Duration) error { cancel(); return nil })
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
+
+func TestRetryArgumentsAndOverflow(t *testing.T) {
+	op := func(context.Context) error { return nil }
+	wait := func(context.Context, time.Duration) error { return nil }
+	if Retry(context.Background(), 0, 0, op, wait) == nil {
+		t.Error("zero attempts accepted")
+	}
+	if Retry(context.Background(), 1, -1, op, wait) == nil {
+		t.Error("negative delay accepted")
+	}
+	if Retry(context.Background(), 1, 0, nil, wait) == nil {
+		t.Error("nil operation accepted")
+	}
+	if Retry(context.Background(), 1, 0, op, nil) == nil {
+		t.Error("nil waiter accepted")
+	}
+	const maximum = time.Duration(1<<63 - 1)
+	var delays []time.Duration
+	_ = Retry(context.Background(), 3, maximum, func(context.Context) error { return errors.New("again") }, func(_ context.Context, d time.Duration) error { delays = append(delays, d); return nil })
+	if !reflect.DeepEqual(delays, []time.Duration{maximum, maximum}) {
+		t.Fatalf("overflowed delay: %v", delays)
+	}
+}

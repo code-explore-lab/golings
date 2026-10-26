@@ -1,0 +1,14 @@
+{
+  "id": "13-k8s-workloads",
+  "title": "Go 健康检查与 Kubernetes 工作负载",
+  "category": "容器与 Kubernetes 基础",
+  "difficulty": "中级",
+  "description": "实现并发安全的 readiness/liveness handler，将 Go 服务构建为镜像并通过 Deployment 与 Service 运行。",
+  "objectives": ["区分存活与就绪", "实现可测试的 HTTP 健康端点", "解释 Pod、Deployment、Service 与资源限制"],
+  "hints": ["liveness 判断进程是否活着；readiness 判断当前是否接收新流量。", "ready 状态会被 HTTP goroutine 和退出逻辑并发访问，可使用 atomic.Bool。", "先完成 httptest 行为测试，再检查 Service selector、探针路径和镜像是否一致。"],
+  "acceptance": ["健康检查测试通过，包括就绪状态切换及并发访问", "在 Minikube 部署两个副本并通过 Service 访问 /readyz", "替换一个 Pod 后 Deployment 恢复两个就绪副本，并口述三种资源的职责"],
+  "concept": "Pod 是运行单元，Deployment 维持副本和滚动更新，Service 提供稳定访问入口并使用就绪端点。readiness 失败停止分发新流量，liveness 失败可能触发容器重启。",
+  "check": "go-test",
+  "integration": true,
+  "prerequisites": ["05-http-validation", "12-container-cgroups"]
+}

@@ -1,0 +1,55 @@
+package exercise
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+type CPU struct {
+	Unlimited    bool
+	QuotaMicros  uint64
+	PeriodMicros uint64
+}
+
+type Memory struct {
+	Unlimited bool
+	Bytes     uint64
+}
+
+func ParseCPU(raw string) (CPU, error) {
+	// TODO: accept exactly "quota period" or "max period".
+	return CPU{}, errors.New("TODO: parse cpu.max")
+}
+
+// CPUCount returns the quota expressed in CPU units and whether it is limited.
+func (c CPU) CPUCount() (float64, bool) {
+	// TODO: an unlimited CPU must not be represented as a zero-CPU limit.
+	return 0, false
+}
+
+func ParseMemory(raw string) (Memory, error) {
+	// TODO: accept max or an unsigned byte count.
+	return Memory{}, errors.New("TODO: parse memory.max")
+}
+
+func ReadLimits(dir string) (CPU, Memory, error) {
+	cpuText, err := os.ReadFile(filepath.Join(dir, "cpu.max"))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("read cpu.max: %w", err)
+	}
+	cpu, err := ParseCPU(string(cpuText))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("parse cpu.max: %w", err)
+	}
+	memoryText, err := os.ReadFile(filepath.Join(dir, "memory.max"))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("read memory.max: %w", err)
+	}
+	memory, err := ParseMemory(string(memoryText))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("parse memory.max: %w", err)
+	}
+	return cpu, memory, nil
+}

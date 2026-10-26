@@ -1,0 +1,3 @@
+module gopath/exercise/02-go-injection
+
+go 1.27

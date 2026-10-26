@@ -1,0 +1,38 @@
+package cluster
+
+import (
+	"fmt"
+	"strings"
+
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+)
+
+// These examples intentionally require a disposable gopath-* namespace on minikube.
+func Clients(namespace string) (kubernetes.Interface, dynamic.Interface, error) {
+	if !strings.HasPrefix(namespace, "gopath-") {
+		return nil, nil, fmt.Errorf("-namespace must name your gopath-* learning namespace")
+	}
+	loading := clientcmd.NewDefaultClientConfigLoadingRules()
+	raw, err := loading.Load()
+	if err != nil {
+		return nil, nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+	if raw.CurrentContext != "minikube" || raw.Contexts["minikube"] == nil {
+		return nil, nil, fmt.Errorf("first select minikube: kubectl config use-context minikube")
+	}
+	config, err := clientcmd.NewNonInteractiveClientConfig(*raw, "minikube", &clientcmd.ConfigOverrides{}, loading).ClientConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	dc, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, dc, nil
+}

@@ -1,0 +1,4 @@
+module gopath/exercise/17-rate-limiter
+
+go 1.23
+

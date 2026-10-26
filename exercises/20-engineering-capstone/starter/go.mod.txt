@@ -1,0 +1,4 @@
+module gopath/exercise/20-engineering-capstone
+
+go 1.23
+

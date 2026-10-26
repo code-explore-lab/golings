@@ -1,0 +1,23 @@
+package exercise
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+func TestFindUser(t *testing.T) {
+	name, err := FindUser(map[string]string{"u1": "Ada"}, "u1")
+	if err != nil || name != "Ada" {
+		t.Fatalf("got (%q, %v)", name, err)
+	}
+}
+func TestFindUserMissingWrapsSentinel(t *testing.T) {
+	_, err := FindUser(nil, "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("errors.Is(%v, ErrNotFound) = false", err)
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing context: %v", err)
+	}
+}

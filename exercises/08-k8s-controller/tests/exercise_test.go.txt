@@ -1,0 +1,241 @@
+package lesson
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/workqueue"
+)
+
+func gadget(namespace, name, message string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "learning.example.io/v1alpha1", "kind": "Gadget",
+		"metadata": map[string]interface{}{"namespace": namespace, "name": name},
+		"spec":     map[string]interface{}{"message": message},
+	}}
+}
+func dynamicFake(objects ...runtime.Object) *fake.FakeDynamicClient {
+	return fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{gadgetGVR: "GadgetList"}, objects...)
+}
+func writeActions(actions []clienttesting.Action) int {
+	total := 0
+	for _, action := range actions {
+		switch action.GetVerb() {
+		case "create", "update", "patch", "delete":
+			total++
+		}
+	}
+	return total
+}
+
+func TestReconcileCreatesUpdatesAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	object := gadget("learning", "demo", "first")
+	dc := dynamicFake(object)
+	client := kubernetesfake.NewSimpleClientset()
+	key := types.NamespacedName{Namespace: "learning", Name: "demo"}
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	cm, err := client.CoreV1().ConfigMaps(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil || cm.Data["message"] != "first" {
+		t.Fatalf("Gadget must produce a matching ConfigMap: object=%v error=%v", cm, err)
+	}
+	client.ClearActions()
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	if writes := writeActions(client.Actions()); writes != 0 {
+		t.Fatalf("unchanged desired state must not write, got %d writes", writes)
+	}
+	cm.Data["unrelated"] = "preserve"
+	if _, err := client.CoreV1().ConfigMaps(key.Namespace).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	object.Object["spec"] = map[string]interface{}{"message": "second"}
+	if _, err := dc.Resource(gadgetGVR).Namespace(key.Namespace).Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reconcile(ctx, dc, client, key); err != nil {
+		t.Fatal(err)
+	}
+	cm, err = client.CoreV1().ConfigMaps(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil || cm.Data["message"] != "second" || cm.Data["unrelated"] != "preserve" {
+		t.Fatalf("update must preserve fields it does not own: %v error=%v", cm, err)
+	}
+}
+
+func TestEnsureConfigMapHandlesNilDataAndReturnsAPIErrors(t *testing.T) {
+	ctx := context.Background()
+	client := kubernetesfake.NewSimpleClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "learning"}})
+	if err := EnsureConfigMap(ctx, client, "learning", "demo", ""); err != nil {
+		t.Fatal(err)
+	}
+	cm, err := client.CoreV1().ConfigMaps("learning").Get(ctx, "demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := cm.Data["message"]; !found {
+		t.Fatal("empty message is a real desired value, not an absent map key")
+	}
+	for _, verb := range []string{"get", "create", "update"} {
+		t.Run(verb, func(t *testing.T) {
+			client := kubernetesfake.NewSimpleClientset()
+			if verb != "create" {
+				client = kubernetesfake.NewSimpleClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "learning"}})
+			}
+			want := errors.New(verb + " failed")
+			client.PrependReactor(verb, "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+				return true, nil, want
+			})
+			if err := EnsureConfigMap(ctx, client, "learning", "demo", "hello"); !errors.Is(err, want) {
+				t.Fatalf("must propagate %s error for the queue: %v", verb, err)
+			}
+		})
+	}
+}
+
+func TestReconcileHandlesMissingOrInvalidSource(t *testing.T) {
+	ctx := context.Background()
+	client := kubernetesfake.NewSimpleClientset()
+	key := types.NamespacedName{Namespace: "learning", Name: "deleted"}
+	if err := Reconcile(ctx, dynamicFake(), client, key); err != nil {
+		t.Fatalf("deleted custom resource should be a successful no-op: %v", err)
+	}
+	object := gadget("learning", "deleted", "hello")
+	delete(object.Object, "spec")
+	if err := Reconcile(ctx, dynamicFake(object), client, key); err == nil {
+		t.Fatal("missing spec.message must be an actionable error")
+	}
+	dc := dynamicFake()
+	want := errors.New("source unavailable")
+	dc.PrependReactor("get", "gadgets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, want
+	})
+	if err := Reconcile(ctx, dc, client, key); !errors.Is(err, want) {
+		t.Fatalf("source read error must be preserved: %v", err)
+	}
+	if writes := writeActions(client.Actions()); writes != 0 {
+		t.Fatal("missing/invalid source must not create target objects")
+	}
+}
+
+func TestQueueRetriesTransientErrorAndForgetsSuccess(t *testing.T) {
+	queue := workqueue.NewTypedRateLimitingQueue(
+		workqueue.NewTypedItemExponentialFailureRateLimiter[types.NamespacedName](0, 0))
+	defer queue.ShutDown()
+	key := types.NamespacedName{Namespace: "learning", Name: "demo"}
+	queue.Add(key)
+	want := errors.New("temporary conflict")
+	var failures int
+	if !processNext(context.Background(), queue, func(context.Context, types.NamespacedName) error { return want },
+		func(err error) {
+			if !errors.Is(err, want) {
+				t.Errorf("unexpected callback error: %v", err)
+			}
+			failures++
+		}) {
+		t.Fatal("worker stopped early")
+	}
+	if queue.NumRequeues(key) != 1 || queue.Len() != 1 || failures != 1 {
+		t.Fatalf("failed reconcile must be requeued once: retries=%d len=%d errors=%d", queue.NumRequeues(key), queue.Len(), failures)
+	}
+	if !processNext(context.Background(), queue, func(context.Context, types.NamespacedName) error { return nil }, nil) {
+		t.Fatal("worker stopped before successful retry")
+	}
+	if queue.NumRequeues(key) != 0 || queue.Len() != 0 {
+		t.Fatal("success must forget retry history and must not requeue")
+	}
+	queue.Add(key)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	processNext(ctx, queue, func(context.Context, types.NamespacedName) error { return ctx.Err() }, nil)
+	if queue.Len() != 0 {
+		t.Fatal("cancellation must not schedule another retry")
+	}
+	queue.ShutDown()
+	if processNext(context.Background(), queue, nil, nil) {
+		t.Fatal("a shutdown queue must stop the worker")
+	}
+}
+
+func TestControllerWatchesGadgetChangesAndRetries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	object := gadget("learning", "demo", "initial")
+	dc := dynamicFake(object)
+	client := kubernetesfake.NewSimpleClientset()
+	changes, err := client.Tracker().Watch(corev1.SchemeGroupVersion.WithResource("configmaps"), "learning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer changes.Stop()
+	transient := errors.New("temporary create failure")
+	var attempts atomic.Int32
+	client.PrependReactor("create", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if attempts.Add(1) == 1 {
+			return true, nil, transient
+		}
+		return false, nil, nil
+	})
+	reported := make(chan error, 32)
+	done := make(chan error, 1)
+	go func() {
+		done <- RunController(ctx, dc, client, "learning", func(err error) { reported <- err })
+	}()
+	waitMessage := func(want string) {
+		t.Helper()
+		for {
+			select {
+			case event := <-changes.ResultChan():
+				if cm, ok := event.Object.(*corev1.ConfigMap); ok && cm.Data["message"] == want {
+					return
+				}
+			case err := <-done:
+				t.Fatalf("controller stopped early: %v", err)
+			case <-ctx.Done():
+				t.Fatalf("controller did not reconcile %q: %v", want, ctx.Err())
+			}
+		}
+	}
+	waitMessage("initial")
+	if attempts.Load() < 2 {
+		t.Fatal("transient failure was not retried")
+	}
+	select {
+	case err := <-reported:
+		if !errors.Is(err, transient) {
+			t.Fatalf("failure callback: %v", err)
+		}
+	default:
+		t.Fatal("failure was silently discarded")
+	}
+	object.Object["spec"] = map[string]interface{}{"message": "changed"}
+	object.SetResourceVersion("2") // fake trackers do not assign API resource versions
+	if _, err := dc.Resource(gadgetGVR).Namespace("learning").Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitMessage("changed")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("controller failed to stop")
+	}
+}

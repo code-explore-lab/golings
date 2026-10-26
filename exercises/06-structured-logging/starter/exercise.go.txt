@@ -1,0 +1,14 @@
+package exercise
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+)
+
+func NewRequestLogger(w io.Writer) *slog.Logger { // TODO: use a JSON handler.
+	return slog.New(slog.NewTextHandler(w, nil))
+}
+func LogRequest(logger *slog.Logger, r *http.Request, status int) { // TODO: include method, path, status fields.
+	logger.Info("request")
+}

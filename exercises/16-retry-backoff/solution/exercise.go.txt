@@ -1,0 +1,38 @@
+package exercise
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+type Waiter func(context.Context, time.Duration) error
+
+func Retry(ctx context.Context, attempts int, baseDelay time.Duration, operation func(context.Context) error, wait Waiter) error {
+	if attempts < 1 || baseDelay < 0 || operation == nil || wait == nil {
+		return errors.New("invalid retry configuration")
+	}
+	delay := baseDelay
+	const maxDelay = time.Duration(1<<63 - 1)
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := operation(ctx)
+		if err == nil {
+			return nil
+		}
+		if attempt == attempts-1 {
+			return err
+		}
+		if err := wait(ctx, delay); err != nil {
+			return err
+		}
+		if delay > maxDelay/2 {
+			delay = maxDelay
+		} else {
+			delay *= 2
+		}
+	}
+	return nil
+}

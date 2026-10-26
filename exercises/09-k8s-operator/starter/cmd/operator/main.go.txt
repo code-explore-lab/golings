@@ -1,0 +1,29 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"os"
+	"os/signal"
+
+	"lesson"
+	"lesson/cmd/internal/cluster"
+)
+
+func main() {
+	namespace := flag.String("namespace", "", "existing gopath-* namespace on minikube")
+	flag.Parse()
+	client, dc, err := cluster.Clients(*namespace)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	log.Printf("watching AppPlans and their Deployments in %s; Ctrl+C stops the operator", *namespace)
+	if err := lesson.RunOperator(ctx, dc, client, *namespace, func(err error) {
+		log.Printf("reconcile failed, queue will retry: %v", err)
+	}); err != nil {
+		log.Fatal(err)
+	}
+}

@@ -1,0 +1,14 @@
+{
+  "id": "14-prometheus-metrics",
+  "title": "Prometheus Go 埋点与独立 Registry",
+  "category": "可观测性",
+  "difficulty": "中级",
+  "description": "使用官方 client_golang 为 HTTP 请求添加 Counter 与 Histogram，并通过独立 registry 暴露 /metrics。",
+  "objectives": ["选择 Counter 与 Histogram", "避免全局 registry 和高基数 route 标签", "验证真实 Prometheus 抓取"],
+  "hints": ["每个 Metrics 创建自己的 prometheus.Registry，并把 collectors 注册到它。", "HandlerFor 暴露指定 registry；Instrument 使用调用者传入的固定路由模板作为标签。", "包装 ResponseWriter 记录首次状态码；未显式 WriteHeader 时按 200 处理。耗时用秒。"],
+  "acceptance": ["Counter、Histogram、状态码及 registry 隔离测试通过", "Go 服务 /metrics 输出真实请求指标", "独立 Prometheus 实例抓取成功，API 查询 up 为 1 且请求计数大于零"],
+  "concept": "Counter 累积请求数，Histogram 按 bucket 记录耗时分布。使用稳定 route 模板避免用户 ID 等高基数字段膨胀时间序列；独立 registry 避免重复注册与测试间共享状态。",
+  "check": "go-test",
+  "integration": true,
+  "prerequisites": ["06-structured-logging", "13-k8s-workloads"]
+}

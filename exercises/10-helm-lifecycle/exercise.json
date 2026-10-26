@@ -1,0 +1,27 @@
+{
+  "id": "10-helm-lifecycle",
+  "title": "Go 驱动 Helm：Chart 打包、安装、升级与回滚",
+  "category": "Kubernetes 扩展",
+  "difficulty": "进阶",
+  "description": "完成可注入 Runner 的 Go Helm 封装，使用实际 Chart 在 Minikube 验证完整 release 生命周期。",
+  "objectives": [
+    "使用 os/exec 的独立 argv 运行外部工具",
+    "显式传递 kube-context / namespace 并传播进程失败",
+    "编写 Deployment + Service Chart，理解 release revision 和回滚"
+  ],
+  "hints": [
+    "command 应检查 ctx.Err、Runner 和子命令；Binary 为空时使用 helm。",
+    "把参数切片原样交给 Runner，不要拼接 shell 命令；包装错误时保留 %w。",
+    "回滚使用历史 revision，产生新的 release revision；不是把历史记录删回原样。"
+  ],
+  "acceptance": [
+    "所有本地参数、错误、取消和真实子进程错误捕获单测通过",
+    "Minikube 中真正执行 lint/template/package/install/upgrade/rollback，并验证就绪副本与 revision 3"
+  ],
+  "concept": "Chart 是带参数的资源模板；release 是一次安装及其修订历史。Helm 管理发布，Controller 持续调谐对象。",
+  "prerequisites": [
+    "07-k8s-client-go"
+  ],
+  "check": "go-test",
+  "integration": true
+}

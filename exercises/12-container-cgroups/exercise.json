@@ -1,0 +1,14 @@
+{
+  "id": "12-container-cgroups",
+  "title": "用 Go 解读 cgroup v2 资源限制",
+  "category": "容器底层",
+  "difficulty": "中级",
+  "description": "解析 cpu.max 与 memory.max，在 Docker 容器中观察 CPU 配额和内存上限。",
+  "objectives": ["区分 max 与有限配额", "根据 quota/period 换算 CPU 容量", "解释资源限制与 namespace 的关系"],
+  "hints": ["cpu.max 有两个字段：配额或 max，以及周期（单位都是微秒）。", "有限 CPU 容量是 quota / period，不是 quota 本身；period 不能为零。", "memory.max 的 max 表示无此级显式上限，有限值使用字节，0 也有意义。"],
+  "acceptance": ["Go fixture 与读取错误测试通过", "在启用 cgroup v2 的 Docker 容器观测 0.5 CPU 与 64 MiB 限制", "口述 CPU throttling、内存上限以及父 cgroup 限制"],
+  "concept": "cgroup v2 通过层次化控制器分配和限制资源；cpu.max 表示每个周期的 CPU 时间预算，memory.max 表示内存硬上限。读取当前级别的 max 不代表祖先没有限制。",
+  "check": "go-test",
+  "integration": true,
+  "prerequisites": ["11-container-namespaces"]
+}

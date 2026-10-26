@@ -1,0 +1,39 @@
+package exercise
+
+import (
+	"errors"
+	"testing"
+)
+
+type fakeNotifier struct {
+	message string
+	err     error
+	calls   int
+}
+
+func (f *fakeNotifier) Send(m string) error { f.message = m; f.calls++; return f.err }
+func TestWelcomeUsesDependency(t *testing.T) {
+	f := &fakeNotifier{}
+	if err := NewService(f).SendWelcome("Lin"); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls != 1 || f.message != "Welcome, Lin!" {
+		t.Fatalf("fake=%#v", f)
+	}
+}
+func TestWelcomePropagatesError(t *testing.T) {
+	want := errors.New("offline")
+	f := &fakeNotifier{err: want}
+	if err := NewService(f).SendWelcome("Lin"); !errors.Is(err, want) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestWelcomeRejectsMissingDependency(t *testing.T) {
+	var missing *Service
+	for _, service := range []*Service{missing, NewService(nil)} {
+		if err := service.SendWelcome("Lin"); err == nil {
+			t.Fatal("missing notifier should return an error")
+		}
+	}
+}

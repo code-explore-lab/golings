@@ -1,0 +1,196 @@
+package exercise
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+)
+
+// This is a transaction fixture, not a production SQL engine.
+type ledgerState struct {
+	balances                       map[string]int64
+	begins, commits, rollbacks     int
+	beginErr, creditErr, commitErr error
+}
+
+var ledgers sync.Map
+var ledgerIDs atomic.Int64
+
+type ledgerDriver struct{}
+type ledgerConn struct {
+	state   *ledgerState
+	pending map[string]int64
+}
+type ledgerTx struct{ conn *ledgerConn }
+
+func init() { sql.Register("gopath-transfer-test", ledgerDriver{}) }
+func (ledgerDriver) Open(name string) (driver.Conn, error) {
+	value, ok := ledgers.Load(name)
+	if !ok {
+		return nil, errors.New("unknown ledger")
+	}
+	return &ledgerConn{state: value.(*ledgerState)}, nil
+}
+func (c *ledgerConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("prepared queries not supported by fixture")
+}
+func (c *ledgerConn) Close() error { return nil }
+func (c *ledgerConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+func (c *ledgerConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	c.state.begins++
+	if c.state.beginErr != nil {
+		return nil, c.state.beginErr
+	}
+	c.pending = make(map[string]int64, len(c.state.balances))
+	for id, balance := range c.state.balances {
+		c.pending[id] = balance
+	}
+	return &ledgerTx{conn: c}, nil
+}
+func (c *ledgerConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if c.pending == nil {
+		return nil, errors.New("all writes must execute through one sql.Tx")
+	}
+	query = strings.Join(strings.Fields(query), " ")
+	switch query {
+	case "UPDATE accounts SET balance = balance - ? WHERE id = ? AND balance >= ?":
+		if len(args) != 3 {
+			return nil, errors.New("debit requires amount, id, minimum")
+		}
+		amount, aok := args[0].Value.(int64)
+		id, iok := args[1].Value.(string)
+		minimum, mok := args[2].Value.(int64)
+		if !aok || !iok || !mok || amount != minimum {
+			return nil, errors.New("invalid debit arguments")
+		}
+		balance, ok := c.pending[id]
+		if !ok || balance < amount {
+			return driver.RowsAffected(0), nil
+		}
+		c.pending[id] = balance - amount
+	case "UPDATE accounts SET balance = balance + ? WHERE id = ?":
+		if c.state.creditErr != nil {
+			return nil, c.state.creditErr
+		}
+		if len(args) != 2 {
+			return nil, errors.New("credit requires amount and id")
+		}
+		amount, aok := args[0].Value.(int64)
+		id, iok := args[1].Value.(string)
+		if !aok || !iok {
+			return nil, errors.New("invalid credit arguments")
+		}
+		balance, ok := c.pending[id]
+		if !ok {
+			return driver.RowsAffected(0), nil
+		}
+		c.pending[id] = balance + amount
+	default:
+		return nil, fmt.Errorf("unsupported SQL in fixture: %s", query)
+	}
+	return driver.RowsAffected(1), nil
+}
+func (tx *ledgerTx) Commit() error {
+	c := tx.conn
+	c.state.commits++
+	if c.state.commitErr != nil {
+		c.pending = nil
+		return c.state.commitErr
+	}
+	c.state.balances = c.pending
+	c.pending = nil
+	return nil
+}
+func (tx *ledgerTx) Rollback() error { tx.conn.state.rollbacks++; tx.conn.pending = nil; return nil }
+
+func openLedger(t *testing.T, state *ledgerState) *sql.DB {
+	t.Helper()
+	name := fmt.Sprint(ledgerIDs.Add(1))
+	ledgers.Store(name, state)
+	db, err := sql.Open("gopath-transfer-test", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close(); ledgers.Delete(name) })
+	return db
+}
+func TestTransferCommitsAtomically(t *testing.T) {
+	s := &ledgerState{balances: map[string]int64{"a": 100, "b": 20}}
+	if err := Transfer(context.Background(), openLedger(t, s), "a", "b", 30); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.balances, map[string]int64{"a": 70, "b": 50}) || s.begins != 1 || s.commits != 1 || s.rollbacks != 0 {
+		t.Fatalf("state=%+v", s)
+	}
+}
+func TestTransferRollsBackBusinessFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, to string
+		amount   int64
+		want     error
+	}{{"insufficient", "b", 101, ErrInsufficientFunds}, {"missing destination", "missing", 30, ErrAccountNotFound}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &ledgerState{balances: map[string]int64{"a": 100, "b": 20}}
+			err := Transfer(context.Background(), openLedger(t, s), "a", tc.to, tc.amount)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err=%v want=%v", err, tc.want)
+			}
+			if !reflect.DeepEqual(s.balances, map[string]int64{"a": 100, "b": 20}) || s.commits != 0 || s.rollbacks != 1 {
+				t.Fatalf("state=%+v", s)
+			}
+		})
+	}
+}
+func TestTransferPreservesDriverErrors(t *testing.T) {
+	for _, stage := range []string{"begin", "credit", "commit"} {
+		t.Run(stage, func(t *testing.T) {
+			want := errors.New(stage + " failure")
+			s := &ledgerState{balances: map[string]int64{"a": 100, "b": 20}}
+			switch stage {
+			case "begin":
+				s.beginErr = want
+			case "credit":
+				s.creditErr = want
+			case "commit":
+				s.commitErr = want
+			}
+			err := Transfer(context.Background(), openLedger(t, s), "a", "b", 30)
+			if !errors.Is(err, want) {
+				t.Fatalf("err=%v want=%v", err, want)
+			}
+			if !reflect.DeepEqual(s.balances, map[string]int64{"a": 100, "b": 20}) {
+				t.Fatalf("partial transfer: %v", s.balances)
+			}
+			if stage == "credit" && s.rollbacks != 1 {
+				t.Fatalf("credit failure rollback count=%d", s.rollbacks)
+			}
+		})
+	}
+}
+func TestTransferRejectsInvalidArgumentsBeforeBegin(t *testing.T) {
+	for _, tc := range []struct {
+		from, to string
+		amount   int64
+	}{{"a", "b", 0}, {"a", "b", -1}, {"", "b", 1}, {"a", " ", 1}, {"a", "a", 1}} {
+		s := &ledgerState{balances: map[string]int64{"a": 100, "b": 20}}
+		if err := Transfer(context.Background(), openLedger(t, s), tc.from, tc.to, tc.amount); err == nil {
+			t.Errorf("accepted invalid transfer %+v", tc)
+		}
+		if s.begins != 0 {
+			t.Errorf("invalid input began a transaction")
+		}
+	}
+	if err := Transfer(context.Background(), nil, "a", "b", 1); err == nil {
+		t.Error("nil DB accepted")
+	}
+}

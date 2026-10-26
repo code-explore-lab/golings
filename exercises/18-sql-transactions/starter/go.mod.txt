@@ -1,0 +1,4 @@
+module gopath/exercise/18-sql-transactions
+
+go 1.23
+

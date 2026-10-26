@@ -1,0 +1,64 @@
+package exercise
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func scrape(t *testing.T, metrics *Metrics) string {
+	t.Helper()
+	r := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("metrics status=%d", r.Code)
+	}
+	return r.Body.String()
+}
+
+func TestRequestCounterAndHistogram(t *testing.T) {
+	metrics := NewMetrics()
+	handler := metrics.Instrument("/users/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Application", "preserved")
+		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("created"))
+	}))
+	for _, path := range []string{"/users/123?token=secret", "/users/456"} {
+		r := httptest.NewRecorder()
+		handler.ServeHTTP(r, httptest.NewRequest(http.MethodPost, path, nil))
+		if r.Code != http.StatusCreated || r.Body.String() != "created" || r.Header().Get("X-Application") != "preserved" {
+			t.Fatalf("middleware changed the application response: %#v", r)
+		}
+	}
+	text := scrape(t, metrics)
+	for _, want := range []string{
+		`# TYPE gopath_http_requests_total counter`,
+		`gopath_http_requests_total{method="POST",route="/users/{id}",status="201"} 2`,
+		`# TYPE gopath_http_request_duration_seconds histogram`,
+		`gopath_http_request_duration_seconds_count{method="POST",route="/users/{id}"} 2`,
+		`gopath_http_request_duration_seconds_bucket{method="POST",route="/users/{id}",le="+Inf"} 2`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing metric %q in:\n%s", want, text)
+		}
+	}
+	for _, raw := range []string{"/users/123", "/users/456", "token=secret"} {
+		if strings.Contains(text, raw) {
+			t.Errorf("raw path/query leaked into metrics: %q", raw)
+		}
+	}
+}
+
+func TestDefaultStatusAndIsolatedRegistries(t *testing.T) {
+	first, second := NewMetrics(), NewMetrics()
+	handler := first.Instrument("/work", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/work", nil))
+	if text := scrape(t, first); !strings.Contains(text, `gopath_http_requests_total{method="GET",route="/work",status="200"} 1`) {
+		t.Fatalf("implicit status must be 200:\n%s", text)
+	}
+	if text := scrape(t, second); strings.Contains(text, "gopath_http_requests_total{") {
+		t.Fatalf("registry state leaked between instances:\n%s", text)
+	}
+}

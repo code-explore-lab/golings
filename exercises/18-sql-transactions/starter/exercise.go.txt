@@ -1,0 +1,15 @@
+package exercise
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+)
+
+var ErrInsufficientFunds = errors.New("source account missing or insufficient balance")
+var ErrAccountNotFound = errors.New("destination account not found")
+
+func Transfer(ctx context.Context, db *sql.DB, from, to string, amount int64) error {
+	// TODO: validate arguments, execute both updates in a transaction, check affected rows, and commit.
+	return nil
+}

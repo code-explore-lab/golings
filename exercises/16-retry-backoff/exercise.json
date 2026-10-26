@@ -1,0 +1,28 @@
+{
+  "id": "16-retry-backoff",
+  "title": "可取消的指数退避重试",
+  "category": "分布式基础",
+  "difficulty": "基础",
+  "description": "实现有限次数重试，注入等待函数，以确定性测试验证退避和取消。",
+  "objectives": [
+    "设置重试次数上限",
+    "按指数退避等待",
+    "传播 context 与底层错误"
+  ],
+  "hints": [
+    "第一个尝试不等待，失败后才调用 wait。",
+    "最后一次失败直接返回；等待序列为 baseDelay、2*baseDelay 等。",
+    "在每次操作前检查 ctx.Err()，等待错误直接返回。"
+  ],
+  "acceptance": [
+    "首次成功不等待",
+    "失败次数有限且等待次数为尝试次数减一",
+    "保留最终操作错误和等待错误",
+    "已取消 context 不调用操作"
+  ],
+  "concept": "有限重试与退避减少瞬时故障压力；生产系统还需根据错误分类和幂等性决定是否重试。本题通过注入 waiter 避免真实睡眠。",
+  "check": "go-test",
+  "prerequisites": [
+    "03-context-cancel"
+  ]
+}

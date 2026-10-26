@@ -1,0 +1,53 @@
+package exercise
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestFiltersResourcesAndSelectors(t *testing.T) {
+	pod := Pod{Request: Resources{500, 256}, Selector: map[string]string{"pool": "general"}}
+	nodes := []Node{
+		{Name: "cpu-small", Labels: map[string]string{"pool": "general"}, Available: Resources{499, 1024}},
+		{Name: "memory-small", Labels: map[string]string{"pool": "general"}, Available: Resources{2000, 255}},
+		{Name: "wrong-pool", Labels: map[string]string{"pool": "gpu"}, Available: Resources{2000, 1024}},
+		{Name: "missing-label", Available: Resources{2000, 1024}},
+		{Name: "exact-fit", Labels: map[string]string{"pool": "general"}, Available: Resources{500, 256}},
+		{Name: "large", Labels: map[string]string{"pool": "general"}, Available: Resources{2000, 1024}},
+	}
+	var names []string
+	for _, node := range EligibleNodes(pod, nodes) {
+		names = append(names, node.Name)
+	}
+	if !reflect.DeepEqual(names, []string{"exact-fit", "large"}) {
+		t.Fatalf("eligible=%v", names)
+	}
+	if nodes[0].Name != "cpu-small" || nodes[4].Available.MilliCPU != 500 {
+		t.Fatal("input nodes modified")
+	}
+}
+func TestChooseNodeSimpleScoreAndStableTie(t *testing.T) {
+	pod := Pod{Request: Resources{500, 1}}
+	nodes := []Node{{Name: "small", Available: Resources{600, 100}}, {Name: "z-large", Available: Resources{2000, 100}}, {Name: "a-large", Available: Resources{2000, 100}}}
+	if name, ok := ChooseNode(pod, nodes); !ok || name != "a-large" {
+		t.Fatalf("choice=(%q,%v)", name, ok)
+	}
+	if name, ok := ChooseNode(Pod{Request: Resources{5000, 1}}, nodes); ok || name != "" {
+		t.Fatalf("unschedulable choice=(%q,%v)", name, ok)
+	}
+}
+func TestInvalidAndEmptySelector(t *testing.T) {
+	nodes := []Node{{Name: "valid", Available: Resources{10, 10}}, {Name: "negative", Available: Resources{-1, 10}}}
+	if got := EligibleNodes(Pod{}, nodes); len(got) != 1 || got[0].Name != "valid" {
+		t.Fatalf("eligible=%v", got)
+	}
+	if got := EligibleNodes(Pod{Request: Resources{-1, 1}}, nodes); len(got) != 0 {
+		t.Fatalf("negative request accepted: %v", got)
+	}
+	if _, ok := ChooseNode(Pod{}, nil); ok {
+		t.Fatal("empty cluster accepted")
+	}
+	if got := EligibleNodes(Pod{Selector: map[string]string{"missing": ""}}, nodes); len(got) != 0 {
+		t.Fatal("absent label matched empty string")
+	}
+}

@@ -1,0 +1,78 @@
+package exercise
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+type CPU struct {
+	Unlimited    bool
+	QuotaMicros  uint64
+	PeriodMicros uint64
+}
+
+type Memory struct {
+	Unlimited bool
+	Bytes     uint64
+}
+
+func ParseCPU(raw string) (CPU, error) {
+	fields := strings.Fields(raw)
+	if len(fields) != 2 {
+		return CPU{}, fmt.Errorf("cpu.max needs quota and period")
+	}
+	period, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil || period == 0 {
+		return CPU{}, fmt.Errorf("invalid CPU period %q", fields[1])
+	}
+	if fields[0] == "max" {
+		return CPU{Unlimited: true, PeriodMicros: period}, nil
+	}
+	quota, err := strconv.ParseUint(fields[0], 10, 64)
+	if err != nil || quota == 0 {
+		return CPU{}, fmt.Errorf("invalid CPU quota %q", fields[0])
+	}
+	return CPU{QuotaMicros: quota, PeriodMicros: period}, nil
+}
+
+func (c CPU) CPUCount() (float64, bool) {
+	if c.Unlimited || c.PeriodMicros == 0 {
+		return 0, false
+	}
+	return float64(c.QuotaMicros) / float64(c.PeriodMicros), true
+}
+
+func ParseMemory(raw string) (Memory, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "max" {
+		return Memory{Unlimited: true}, nil
+	}
+	limit, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return Memory{}, fmt.Errorf("invalid memory.max %q: %w", raw, err)
+	}
+	return Memory{Bytes: limit}, nil
+}
+
+func ReadLimits(dir string) (CPU, Memory, error) {
+	cpuText, err := os.ReadFile(filepath.Join(dir, "cpu.max"))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("read cpu.max: %w", err)
+	}
+	cpu, err := ParseCPU(string(cpuText))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("parse cpu.max: %w", err)
+	}
+	memoryText, err := os.ReadFile(filepath.Join(dir, "memory.max"))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("read memory.max: %w", err)
+	}
+	memory, err := ParseMemory(string(memoryText))
+	if err != nil {
+		return CPU{}, Memory{}, fmt.Errorf("parse memory.max: %w", err)
+	}
+	return cpu, memory, nil
+}

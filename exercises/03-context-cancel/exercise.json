@@ -1,0 +1,1 @@
+{"id":"03-context-cancel","title":"Context 取消传播","category":"并发与可靠性","difficulty":"基础","description":"等待 context 结束并返回标准取消原因。","objectives":["理解 Done channel","响应调用者取消","避免轮询与固定 sleep"],"hints":["阻塞等待 ctx.Done()。","取消后返回 ctx.Err()。"],"acceptance":["context 取消时函数返回","取消和 deadline 错误均可由 errors.Is 判断"],"concept":"Context 从请求边界向下游传播取消和截止时间。","check":"go-test"}
